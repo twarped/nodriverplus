@@ -30,6 +30,7 @@ from ..utils import extract_links
 from ..js.load import load_text as load_js
 from . import cloudflare
 from datetime import timedelta
+from .connection import send_cdp as _send_cdp
 
 logger = logging.getLogger(__name__)
 
@@ -118,31 +119,17 @@ class NodriverPlus:
         return self.browser
 
 
-    async def send_message(
+    async def send_cdp(
         self,
         method: str,
         params: dict = {},
         session_id: str = None,
-        connection: nodriver.Tab | nodriver.Connection = None
+        connection: nodriver.Tab | nodriver.Connection = None,
     ):
-        """thin helper/patch to send a raw devtools command.
+        """wrapper of `nodriver.connection.send_cdp`"""
 
-        yields a dict suitable for nodriver's generator-based send() made specifically for this `nodriver` patch: 
-        
-        https://github.com/twarped/nodriver/commit/bf1dfda6cb16a31d2fd302f370f130dda3a3413b
-
-        :param method: full method name (e.g. "Runtime.evaluate").
-        :param params: payload dict; omit if none.
-        :param session_id: target session if addressing a child target.
-        :param connection: override connection (tab or underlying connection).
-        :return: protocol response pair (varies by method) or None.
-        """
-        def c():
-            yield {"method": method, "params": params, "sessionId": session_id}
-
-        if connection:
-            return await connection.send(c())
-        return await self.browser.connection.send(c())
+        connection = connection or self.browser
+        return await _send_cdp(connection, method, params, session_id)
 
 
     async def autohook_stealth(self, connection: nodriver.Tab | nodriver.Connection, ev: cdp.target.AttachedToTarget = None):
@@ -163,7 +150,7 @@ class NodriverPlus:
         setattr(connection, "_stealth_auto_attached", True)
 
         try:
-            await self.send_message("Target.setAutoAttach", {
+            await self.send_cdp("Target.setAutoAttach", {
                 "autoAttach": True,
                 "waitForDebuggerOnStart": True,
                 "flatten": True,
@@ -193,7 +180,7 @@ class NodriverPlus:
         # continue like normal
         msg = f"{ev.target_info.type_} <{ev.target_info.url}>"
         try:
-            await self.send_message("Runtime.runIfWaitingForDebugger", session_id=ev.session_id)
+            await self.send_cdp("Runtime.runIfWaitingForDebugger", session_id=ev.session_id)
         except Exception as e:
             if "-3200" in str(e):
                 logger.warning("too slow resuming %s", msg)
@@ -220,8 +207,8 @@ class NodriverPlus:
         # try adding the patch to the page
         try:
             if can_use_domain(ev.target_info.type_, "Page"):
-                await self.send_message("Page.enable", session_id=ev.session_id)
-                await self.send_message("Page.addScriptToEvaluateOnNewDocument", {
+                await self.send_cdp("Page.enable", session_id=ev.session_id)
+                await self.send_cdp("Page.addScriptToEvaluateOnNewDocument", {
                     "source": js,
                     "includeCommandLineAPI": True,
                     "runImmediately": True
@@ -231,7 +218,7 @@ class NodriverPlus:
             logger.exception("failed to add script to %s:", msg)
 
         try:
-            await self.send_message("Runtime.evaluate", {
+            await self.send_cdp("Runtime.evaluate", {
                 "expression": js,
                 "includeCommandLineAPI": True,
                 "awaitPromise": True
@@ -310,7 +297,7 @@ class NodriverPlus:
         domains_patched = []
 
         if can_use_domain(target_type, "Network"):
-            await self.send_message(
+            await self.send_cdp(
                 "Network.setUserAgentOverride", 
                 user_agent.to_json(), 
                 target.session_id, 
@@ -318,7 +305,7 @@ class NodriverPlus:
             )
             domains_patched.append("Network")
         if can_use_domain(target_type, "Emulation"):
-            await self.send_message(
+            await self.send_cdp(
                 "Emulation.setUserAgentOverride", 
                 user_agent.to_json(), 
                 target.session_id, 
@@ -328,7 +315,7 @@ class NodriverPlus:
         if can_use_domain(target_type, "Runtime"):
             js = load_js("patch_user_agent.js")
             uaPatch = f"const uaPatch = {user_agent.to_json(True, True)};"
-            await self.send_message("Runtime.evaluate", {
+            await self.send_cdp("Runtime.evaluate", {
                 "expression": js.replace("//uaPatch//", uaPatch),
                 "includeCommandLineAPI": True,
             }, target.session_id, target if is_connection else None)
