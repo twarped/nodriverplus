@@ -1,6 +1,7 @@
 import logging
 from typing import Callable, Coroutine
 from nodriver import cdp, Tab, Connection, Browser
+import nodriver
 from ..cdp_helpers import TARGET_DOMAINS
 from ..connection import send_cdp
 
@@ -9,115 +10,146 @@ logger = logging.getLogger(__name__)
 class TargetInterceptor:
     """base class for a target interceptor
 
-    they must provide a handle method that takes a connection and an event.
+    you must provide a `handle()` method that takes a connection and an event.
 
     called by `apply_target_interceptors()`
     """
 
     async def handle(
+        self,
         connection: Tab | Connection,
-        ev: cdp.target.AttachedToTarget
+        ev: cdp.target.AttachedToTarget | None
     ):
+        """hook for handling target attachment events
+
+        :param connection: the connection to the target.
+        :param ev: **may be `None`** depending on how you call it, so be aware.
+        :type ev: AttachedToTarget | None
+        """
         pass
 
     def __init__(self, 
-        handle: Callable[[Tab | Connection, cdp.target.AttachedToTarget], Coroutine[any, any, None]] | None = None
+        handle: Callable[[Tab | Connection, cdp.target.AttachedToTarget | None], Coroutine[any, any, None]] | None = None
     ):
         if handle:
             self.handle = handle
 
+class TargetInterceptorManager:
+    connection: Tab | Connection
+    interceptors: list[TargetInterceptor]
 
-async def autohook_connection(
-    connection: Tab | Connection, 
-    ev: cdp.target.AttachedToTarget = None
-):
-    """enable Target.setAutoAttach recursively and attach target interceptors
+    def __init__(self, 
+        session: Tab | Connection | Browser = None, 
+        interceptors: list[TargetInterceptor] = []
+    ):
+        """init TargetInterceptorManager
 
-    attaches recursively to workers/frames and ensures target interceptor application
-
-    :param connection: tab/connection/browsers connection.
-    :param ev: optional original attach event (when recursively called).
-    """
-    types = list(TARGET_DOMAINS.keys())
-    types.remove("tab")
-
-    # hangs on service workers if not deduped
-    if getattr(connection, "_already_attached", False):
-        return
-    setattr(connection, "_already_attached", True)
-
-    try:
-        await send_cdp(connection, "Target.setAutoAttach", {
-            "autoAttach": True,
-            "waitForDebuggerOnStart": True,
-            "flatten": True,
-            "filter": [{"type": t, "exclude": False} for t in types]
-        }, ev.session_id if ev else None)
-    except Exception:
-        logger.exception("auto attach failed for %s:", 
-    f"{ev.target_info.type_} <{ev.target_info.url}>" if ev else connection)
+        for now, each `TargetInterceptorManager` can only have one session
+        :param session: the session that you want to add `TargetInterceptor`'s to.
+        :param interceptors: a list of `TargetInterceptor`'s to add to the manager.
+        """
+        self.connection = session.connection if isinstance(session, Browser) else session
+        self.interceptors = interceptors
 
 
-async def apply_target_interceptors(
-    connection: Tab | Browser | Connection,
-    ev: cdp.target.AttachedToTarget, 
-    target_interceptors: list[TargetInterceptor]
-):
-    """apply a list of target interceptors--in order--to a connection and event.
+    async def set_hook(
+        self,
+        ev: cdp.target.AttachedToTarget | None
+    ):
+        """enable Target.setAutoAttach recursively and attach target interceptors
 
-    :param connection: the connection to apply the interceptors to.
-    :param ev: the event to pass to the interceptors.
-    :param target_interceptors: the ordered list of target interceptors to apply.
-    """
-    for interceptor in target_interceptors:
-        await interceptor.handle(connection, ev)
-        
-        
-async def on_attach_target_interceptors(
-    session: Tab | Browser | Connection,
-    ev: cdp.target.AttachedToTarget,
-    target_interceptors: list[TargetInterceptor]
-):        
-    """handler fired when a new target is auto-attached.
+        attaches recursively to workers/frames and ensures target interceptor application
 
-    applies `TargetInterceptor`s and recursively attaches to child sessions/targets
+        :param ev: optional original attach event (when recursively called).
+        """
+        connection = self.connection
+        types = list(TARGET_DOMAINS.keys())
+        types.remove("tab")
 
-    :param ev: CDP AttachedToTarget event.
-    :param session: object providing .connection (browser or tab or connection it.
-    """
-    connection = session.connection if isinstance(session, Browser) else session
+        # hangs on service workers if not deduped
+        if getattr(connection, "_already_attached", False):
+            return
+        setattr(connection, "_already_attached", True)
 
-    logger.info("successfully attached to %s", f"{ev.target_info.type_} <{ev.target_info.url}>")
-    # apply target_interceptors
-    # TODO: turn patch_user_agent into a TargetInterceptor
-    await apply_target_interceptors(connection, ev, target_interceptors)
-
-    # recursive attachment
-    await autohook_connection(connection, ev)
-    # continue like normal
-    msg = f"{ev.target_info.type_} <{ev.target_info.url}>"
-    try:
-        await send_cdp(connection, "Runtime.runIfWaitingForDebugger", session_id=ev.session_id)
-    except Exception as e:
-        if "-3200" in str(e):
-            logger.warning("too slow resuming %s", msg)
+        if ev:
+            msg = f"{ev.target_info.type_} <{ev.target_info.url}>"
+            session_id = ev.session_id
         else:
-            logger.exception("failed to resume %s:", msg)
-    else:
-        logger.info("successfully resumed %s", msg)
+            msg = connection
+            session_id = None
+        logger.info("setting auto attach for %s", msg)
+        try:
+            await send_cdp(connection, "Target.setAutoAttach", {
+                "autoAttach": True,
+                "waitForDebuggerOnStart": True,
+                "flatten": True,
+                "filter": [{"type": t, "exclude": False} for t in types]
+            }, session_id)
+        except Exception:
+            logger.exception("auto attach failed for %s:", msg)
 
 
-async def setup_target_interceptor_autoattach(session: Tab | Browser | Connection):
-    """one-time setup on a root connection to enable recursive `TargetInterceptor` application.
 
-    :param session: target session for the operation.
-    """
-    connection = session.connection if isinstance(session, Browser) else session
+    async def apply(
+        self,
+        ev: cdp.target.AttachedToTarget | None,
+    ):
+        """apply a list of target interceptors--(in order)--to 
+        `self.connection` with the `AttachedToTarget` event if available.
 
-    # avoid duping stuff
-    if getattr(connection, "_target_interceptors_initialized", False):
-        return
-    setattr(connection, "_target_interceptors_initialized", True)
+        :param ev: the event to pass to the interceptors.
+        """
+        for interceptor in self.interceptors:
+            await interceptor.handle(self.connection, ev)
+            
+            
+    async def on_attach(
+        self,
+        ev: cdp.target.AttachedToTarget | None,
+    ):        
+        """handler fired when a new target is auto-attached.
 
-    connection.add_handler(cdp.target.AttachedToTarget, on_attach_target_interceptors)
-    await autohook_connection(connection)
+        applies `TargetInterceptor`s and recursively attaches to child sessions/targets
+
+        :param ev: CDP AttachedToTarget event.
+        """
+        connection = self.connection
+
+        if ev is not None:
+            msg = f"{ev.target_info.type_} <{ev.target_info.url}>"
+            session_id = ev.session_id
+        else:
+            msg = connection
+            session_id = None
+        logger.info("successfully attached to %s", msg)
+        # apply interceptors
+        await self.apply(ev)
+        # recursive attachment
+        await self.set_hook(ev)
+        # continue like normal
+        try:
+            await send_cdp(connection, "Runtime.runIfWaitingForDebugger", session_id=session_id)
+        except Exception as e:
+            if "-3200" in str(e):
+                logger.warning("too slow resuming %s", msg)
+            else:
+                logger.exception("failed to resume %s:", msg)
+        else:
+            logger.info("successfully resumed %s", msg)
+
+
+    async def start(
+        self,
+    ):
+        """
+        start the hook on `self.connection` to recursively apply `TargetInterceptor`s.
+        """
+        connection = self.connection
+
+        # avoid duping stuff
+        if getattr(connection, "_target_interceptor_manager_initialized", False):
+            return
+        setattr(connection, "_target_interceptor_manager_initialized", True)
+
+        connection.add_handler(cdp.target.AttachedToTarget, self.on_attach)
+        await self.set_hook(None)

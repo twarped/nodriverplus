@@ -31,6 +31,12 @@ from ..js.load import load_text as load_js
 from . import cloudflare
 from datetime import timedelta
 from .connection import send_cdp as _send_cdp
+from .interceptors import TargetInterceptor, TargetInterceptorManager
+from .interceptors.stock import (
+    UserAgentInterceptor, 
+    StealthInterceptor, 
+    patch_user_agent
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,12 +59,33 @@ class NodriverPlus:
     config: nodriver.Config
     user_agent: UserAgent
     stealth: bool
+    interceptor_manager: TargetInterceptorManager
 
-    def __init__(self, user_agent: UserAgent = None, stealth: bool = True):
+    def __init__(self, 
+        user_agent: UserAgent = None, 
+        stealth: bool = True, 
+        interceptors: list[TargetInterceptor] = None
+    ):
+        """initialize a `NodriverPlus` instance
+        
+        :param user_agent: `UserAgent` to patch browser with 
+        using stock interceptor: `UserAgentInterceptor`
+        :param stealth: whether to apply the stock interceptor: `StealthInterceptor`
+        :param interceptors: list of additional custom interceptors to apply
+        """
         self.config = Config()
         self.browser = None
         self.user_agent = user_agent
         self.stealth = stealth
+        # init interceptor manager and add provided + stock interceptors
+        interceptor_manager = TargetInterceptorManager()
+        interceptor_manager.interceptors.extend(interceptors or [])
+        if user_agent:
+            interceptor_manager.interceptors.append(UserAgentInterceptor(user_agent, stealth))
+        if stealth:
+            interceptor_manager.interceptors.append(StealthInterceptor())
+        self.interceptor_manager = interceptor_manager
+
 
     async def start(self,
         config: Config | None = None,
@@ -109,11 +136,20 @@ class NodriverPlus:
         )
 
         if not self.user_agent:
-            self.user_agent = await self.get_user_agent(self.browser.main_tab)
-        await self.patch_user_agent(self.browser.main_tab, self.user_agent)
+            user_agent = await self.get_user_agent(self.browser.main_tab)
+            self.user_agent = user_agent
+            self.interceptor_manager.interceptors.append(
+                UserAgentInterceptor(user_agent, self.stealth)
+            )
+        await patch_user_agent(
+            self.browser.main_tab, 
+            None,
+            self.user_agent,
+            self.stealth
+        )
 
-        if self.stealth:
-            await self.setup_stealth(self.browser)
+        self.interceptor_manager.connection = self.browser.connection
+        await self.interceptor_manager.start()
 
         self.config = self.browser.config
         return self.browser
@@ -132,122 +168,6 @@ class NodriverPlus:
         return await _send_cdp(connection, method, params, session_id)
 
 
-    async def autohook_target_interceptors(self, connection: nodriver.Tab | nodriver.Connection, ev: cdp.target.AttachedToTarget = None):
-        """enable Target.setAutoAttach with our filter + resume logic.
-
-        attaches recursively to workers/frames and ensures stealth patches + user agent
-        overrides are applied before scripts run. idempotent per connection.
-
-        :param connection: tab/connection/browsers connection.
-        :param ev: optional original attach event (when recursively called).
-        """
-        types = list(TARGET_DOMAINS.keys())
-        types.remove("tab")
-
-        # hangs on service workers if not deduped
-        if getattr(connection, "_already_attached", False):
-            return
-        setattr(connection, "_already_attached", True)
-
-        try:
-            await self.send_cdp("Target.setAutoAttach", {
-                "autoAttach": True,
-                "waitForDebuggerOnStart": True,
-                "flatten": True,
-                "filter": [{"type": t, "exclude": False} for t in types]
-            }, ev.session_id if ev else None)
-        except Exception:
-            logger.exception("auto attach failed for %s:", 
-                f"{ev.target_info.type_} <{ev.target_info.url}>" if ev else connection)
-
-
-    async def on_attach_stealth(self, ev: cdp.target.AttachedToTarget, session: nodriver.Tab | nodriver.Browser | nodriver.Connection):        
-        """handler fired when a new target is auto-attached.
-
-        applies stealth js + ua patch, then resumes the debugger
-
-        :param ev: CDP AttachedToTarget event.
-        :param session: object providing .connection (browser or tab or connection itself).
-        """
-        connection = session.connection if isinstance(session, nodriver.Browser) else session
-
-        logger.debug("successfully attached to %s", f"{ev.target_info.type_} <{ev.target_info.url}>")
-        # apply patches
-        await self.apply_stealth(ev)
-        await self.patch_user_agent(ev, self.user_agent)
-        # recursive attachment
-        await self.autohook_target_interceptors(connection, ev)
-        # continue like normal
-        msg = f"{ev.target_info.type_} <{ev.target_info.url}>"
-        try:
-            await self.send_cdp("Runtime.runIfWaitingForDebugger", session_id=ev.session_id)
-        except Exception as e:
-            if "-3200" in str(e):
-                logger.warning("too slow resuming %s", msg)
-            else:
-                logger.exception("failed to resume %s:", msg)
-        else:
-            logger.debug("successfully resumed %s", msg)
-
-
-    async def apply_stealth(self, ev: cdp.target.AttachedToTarget):
-        """inject stealth patch into a target (runtime + early document script).
-
-        chooses worker/page variant based on target type.
-
-        :param ev: attach event describing the target.
-        """
-        # load and apply the stealth patch
-        name = "apply_stealth.js"
-        if ev.target_info.type_ in {"service_worker", "shared_worker"}:
-            name = "apply_stealth_worker.js"
-        js = load_js(name)
-        msg = f"{ev.target_info.type_} <{ev.target_info.url}>"
-
-        # try adding the patch to the page
-        try:
-            if can_use_domain(ev.target_info.type_, "Page"):
-                await self.send_cdp("Page.enable", session_id=ev.session_id)
-                await self.send_cdp("Page.addScriptToEvaluateOnNewDocument", {
-                    "source": js,
-                    "includeCommandLineAPI": True,
-                    "runImmediately": True
-                }, ev.session_id)
-                logger.debug("successfully added script to %s", msg)
-        except Exception:
-            logger.exception("failed to add script to %s:", msg)
-
-        try:
-            await self.send_cdp("Runtime.evaluate", {
-                "expression": js,
-                "includeCommandLineAPI": True,
-                "awaitPromise": True
-            }, session_id=ev.session_id)
-        except Exception as e:
-            if "-3200" in str(e):
-                logger.warning("too slow patching %s", msg)
-            else:
-                logger.exception("failed to patch %s:", msg)
-        else:
-            logger.debug("successfully applied patch to %s", msg)
-
-
-    async def setup_stealth(self, session: nodriver.Tab | nodriver.Browser | nodriver.Connection):
-        """one-time setup on a root connection to enable recursive stealth patching.
-
-        :param session: target session for the operation.
-        """
-        connection = session.connection if isinstance(session, nodriver.Browser) else session
-
-        # avoid duping stuff
-        if getattr(connection, "_target_interceptors_initialized", False):
-            return
-        setattr(connection, "_target_interceptors_initialized", True)
-
-        connection.add_handler(cdp.target.AttachedToTarget, self.on_attach_stealth)
-        await self.autohook_target_interceptors(connection)
-
-
     async def get_user_agent(self, tab: nodriver.Tab):
         """evaluate helper script in a tab to extract structured user agent data.
 
@@ -264,67 +184,6 @@ class NodriverPlus:
         logger.info("successfully retrieved user agent from %s", tab.url)
         logger.debug("user agent data retrieved from %s: \n%s", tab.url, user_agent.to_json())
         return user_agent
-
-
-    async def patch_user_agent(self, 
-        target: cdp.target.AttachedToTarget | nodriver.Tab,
-        user_agent: UserAgent,
-    ):
-        """apply UA overrides across relevant domains for a target.
-
-        removes "Headless" when `self.stealth=True`
-
-        sets Network + Emulation overrides and installs a runtime 
-        patch so navigator + related surfaces align. worker/page aware.
-
-        :param target: tab or AttachedToTarget event.
-        :param user_agent: prepared UserAgent instance.
-        """
-        if self.stealth:
-            user_agent.user_agent = user_agent.user_agent.replace("Headless", "")
-            user_agent.app_version = user_agent.app_version.replace("Headless", "")
-
-        # hacky, but it works
-        if isinstance(target, nodriver.Tab):
-            is_connection = True
-            target_type = "page"
-            msg = f"tab <{target.url}>"
-            target.session_id = None
-        else:
-            is_connection = False
-            target_type = target.target_info.type_
-            msg = f"{target_type} <{target.target_info.url}>"
-        domains_patched = []
-
-        if can_use_domain(target_type, "Network"):
-            await self.send_cdp(
-                "Network.setUserAgentOverride", 
-                user_agent.to_json(), 
-                target.session_id, 
-                target if is_connection else None
-            )
-            domains_patched.append("Network")
-        if can_use_domain(target_type, "Emulation"):
-            await self.send_cdp(
-                "Emulation.setUserAgentOverride", 
-                user_agent.to_json(), 
-                target.session_id, 
-                target if is_connection else None
-            )
-            domains_patched.append("Emulation")
-        if can_use_domain(target_type, "Runtime"):
-            js = load_js("patch_user_agent.js")
-            uaPatch = f"const uaPatch = {user_agent.to_json(True, True)};"
-            await self.send_cdp("Runtime.evaluate", {
-                "expression": js.replace("//uaPatch//", uaPatch),
-                "includeCommandLineAPI": True,
-            }, target.session_id, target if is_connection else None)
-            domains_patched.append("Runtime")
-
-        if len(domains_patched) == 0:
-            logger.debug("no domains available to patch user agent for %s", msg)
-        else:
-            logger.debug("successfully patched user agent for %s with domains %s", msg, domains_patched)
 
 
     async def acquire_tab(self,
@@ -725,7 +584,7 @@ class NodriverPlus:
             # per-scrape dedupe state so concurrent scrapes don't collide
             active_fetch_interceptions: set[str] = set()
             active_fetch_lock: asyncio.Lock = asyncio.Lock()
-            fetch_handler = await self.scrape_bytes(
+            fetch_handler = await self._scrape_bytes(
                 url, tab, scrape_response, pending_tasks,
                 active_fetch_interceptions=active_fetch_interceptions,
                 active_fetch_lock=active_fetch_lock,
@@ -814,7 +673,7 @@ class NodriverPlus:
         return scrape_response
     
 
-    async def scrape_bytes(self, 
+    async def _scrape_bytes(self, 
         url: str, 
         tab: nodriver.Tab, 
         scrape_response: ScrapeResponse,
