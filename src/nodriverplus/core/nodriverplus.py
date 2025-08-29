@@ -132,7 +132,7 @@ class NodriverPlus:
         return await _send_cdp(connection, method, params, session_id)
 
 
-    async def autohook_stealth(self, connection: nodriver.Tab | nodriver.Connection, ev: cdp.target.AttachedToTarget = None):
+    async def autohook_target_interceptors(self, connection: nodriver.Tab | nodriver.Connection, ev: cdp.target.AttachedToTarget = None):
         """enable Target.setAutoAttach with our filter + resume logic.
 
         attaches recursively to workers/frames and ensures stealth patches + user agent
@@ -145,9 +145,9 @@ class NodriverPlus:
         types.remove("tab")
 
         # hangs on service workers if not deduped
-        if getattr(connection, "_stealth_auto_attached", False):
+        if getattr(connection, "_already_attached", False):
             return
-        setattr(connection, "_stealth_auto_attached", True)
+        setattr(connection, "_already_attached", True)
 
         try:
             await self.send_cdp("Target.setAutoAttach", {
@@ -176,7 +176,7 @@ class NodriverPlus:
         await self.apply_stealth(ev)
         await self.patch_user_agent(ev, self.user_agent)
         # recursive attachment
-        await self.autohook_stealth(connection, ev)
+        await self.autohook_target_interceptors(connection, ev)
         # continue like normal
         msg = f"{ev.target_info.type_} <{ev.target_info.url}>"
         try:
@@ -240,12 +240,12 @@ class NodriverPlus:
         connection = session.connection if isinstance(session, nodriver.Browser) else session
 
         # avoid duping stuff
-        if getattr(connection, "_stealth_initialized", False):
+        if getattr(connection, "_target_interceptors_initialized", False):
             return
-        setattr(connection, "_stealth_initialized", True)
+        setattr(connection, "_target_interceptors_initialized", True)
 
         connection.add_handler(cdp.target.AttachedToTarget, self.on_attach_stealth)
-        await self.autohook_stealth(connection)
+        await self.autohook_target_interceptors(connection)
 
 
     async def get_user_agent(self, tab: nodriver.Tab):

@@ -26,14 +26,14 @@ this library is mostly just a working proof of concept as of now, and will need 
 - [ ] solve datadome puzzle slider
 - [ ] migrate low level functions from `NodriverPlus` into separate files like `tab.py` or something
 	- [ ] then attach the high level `NodriverPlus` to those functions to make it more maintainable
-- [ ] turn stealth and `scrape_bytes` logic/functionality into sharks/strings of functions that will occur in each of these events:
+- [ ] turn stealth and `scrape_bytes` logic/functionality into target_interceptors/strings of functions that will occur in each of these events:
 	- [ ] target creation/attachment
 	- [ ] request interception
 	- [ ] response interception
 	- [ ] make sure that it can still follow redirects and stuff though
 	- [ ] and stay perfectly timed and stuff too
-- [ ] add sharks: `ScrapeRequestInterceptor` and `ScrapeResponseInterceptor`
-- [ ] turn handwritten sharks into ones using the new api
+- [ ] add target_interceptors: `ScrapeRequestInterceptor` and `ScrapeResponseInterceptor`
+- [ ] turn handwritten target_interceptors into ones using the new api
 - [ ] add option to receive bytes as stream on `ScrapeResponse` instead of a cached var
 - [ ] update `CrawlResultHandler` and `NodriverPlusManager` to handle errors and stuff
 - [ ] make `pymupdf` optional
