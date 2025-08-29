@@ -1,0 +1,48 @@
+[project]
+name = "nodriverplus"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "twarped", email = "samthebeastofall@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "beautifulsoup4>=4.13.5",
+    "html-to-markdown>=1.9.0",
+    "nodriver",
+    "pymupdf>=1.26.4",
+    "pytest>=8.4.1",
+    "pytest-asyncio>=1.1.0",
+    "urlcanon>=0.3.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.8.0,<0.9"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+nodriver = { git = "https://github.com/twarped/nodriver" }
+
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = "src"
+markers = [
+    "suite: tests that check real world scenarios",
+    "browser: tests that run a nodriver browser instance",
+    "network: tests that require network access",
+    "manager: tests that require the nodriver manager",
+    "crawl: tests that involve `crawl()`",
+    "scrape: tests that involve `scrape()`",
+    "bytes_: tests that involve scraped bytes",
+    "stealth: tests that involve stealth",
+    "markdown: tests that involve Markdown conversion",
+]
+
+filterwarnings = [
+    "ignore:.*SwigPyPacked has no __module__ attribute:DeprecationWarning",
+    "ignore:.*SwigPyObject has no __module__ attribute:DeprecationWarning",
+    "ignore:.*swigvarlink has no __module__ attribute:DeprecationWarning",
+]
