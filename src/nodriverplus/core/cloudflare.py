@@ -1,6 +1,21 @@
 import re
 
+"""
+it has to be a network watcher. see https://app.apollo.io/#/login
+and https://nowsecure.nl
+
+i think it has to do with `cf-chl-out` and `cf-ch-out-s` response headers
+
+`cf_clearance` is the cookie that if it gets set, it bypasses the challenge.
+
+but https://nowsecure.nl does some weird network crap where 
+it says it sets good cookies, but actually doesn't?
+"""
+
+
 CHECKBOX_MARKERS: list[re.Pattern] = [
+    # TODO: the cdn-cgi... marker needs to be a 
+    # network watcher rather than a DOM watcher
     re.compile(r"/cdn-cgi/challenge-platform/h/", re.IGNORECASE),
     re.compile(r"<title>Just a moment\.\.\.</title>", re.IGNORECASE),
 ]

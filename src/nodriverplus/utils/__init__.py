@@ -12,6 +12,7 @@ keep surface tiny + predictable.
 from .pdf import pdf_to_html
 from .markdown import html_to_markdown
 from .html import extract_links
+from .urls import fix_url
 
 class ByteType:
     name: str | None
@@ -66,4 +67,5 @@ __all__ = [
     "ByteType",
     "get_type",
     "to_markdown",
+    "fix_url",
 ]

@@ -15,26 +15,24 @@ import asyncio
 import time
 import random
 from datetime import datetime, UTC
-import json
 import logging
 from os import PathLike
 import asyncio, base64, re
 from urllib.parse import urlparse, urljoin
-import urlcanon
 import nodriver
 from nodriver import Config, cdp
 from .cdp_helpers import TARGET_DOMAINS, can_use_domain
 from .user_agent import *
 from .scrape_response import *
-from ..utils import extract_links
-from ..js.load import load_text as load_js
+from ..utils import extract_links, fix_url
 from . import cloudflare
 from datetime import timedelta
 from .connection import send_cdp as _send_cdp
-from .interceptors import TargetInterceptor, TargetInterceptorManager
-from .interceptors.stock import (
-    UserAgentInterceptor, 
-    StealthInterceptor, 
+from .tab import acquire_tab, get_user_agent
+from .pause_handlers import TargetInterceptor, TargetInterceptorManager
+from .pause_handlers.stock import (
+    UserAgentPatch, 
+    StealthPatch, 
     patch_user_agent
 )
 
@@ -81,9 +79,9 @@ class NodriverPlus:
         interceptor_manager = TargetInterceptorManager()
         interceptor_manager.interceptors.extend(interceptors or [])
         if user_agent:
-            interceptor_manager.interceptors.append(UserAgentInterceptor(user_agent, stealth))
+            interceptor_manager.interceptors.append(UserAgentPatch(user_agent, stealth))
         if stealth:
-            interceptor_manager.interceptors.append(StealthInterceptor())
+            interceptor_manager.interceptors.append(StealthPatch())
         self.interceptor_manager = interceptor_manager
 
 
@@ -136,10 +134,10 @@ class NodriverPlus:
         )
 
         if not self.user_agent:
-            user_agent = await self.get_user_agent(self.browser.main_tab)
+            user_agent = await get_user_agent(self.browser.main_tab)
             self.user_agent = user_agent
             self.interceptor_manager.interceptors.append(
-                UserAgentInterceptor(user_agent, self.stealth)
+                UserAgentPatch(user_agent, self.stealth)
             )
         await patch_user_agent(
             self.browser.main_tab, 
@@ -166,67 +164,6 @@ class NodriverPlus:
 
         connection = connection or self.browser
         return await _send_cdp(connection, method, params, session_id)
-
-
-    async def get_user_agent(self, tab: nodriver.Tab):
-        """evaluate helper script in a tab to extract structured user agent data.
-
-        converts returned json into UserAgent / UserAgentMetadata models.
-
-        :param tab: target tab for the operation.
-        :return: structured user agent data.
-        :rtype: UserAgent
-        """
-        js = load_js("get_user_agent.js")
-        ua_data: dict = json.loads(await tab.evaluate(js, await_promise=True))
-        ua_data["metadata"] = UserAgentMetadata(**ua_data["metadata"]) if ua_data.get("metadata") else None
-        user_agent = UserAgent(**ua_data)
-        logger.info("successfully retrieved user agent from %s", tab.url)
-        logger.debug("user agent data retrieved from %s: \n%s", tab.url, user_agent.to_json())
-        return user_agent
-
-
-    async def acquire_tab(self,
-        *,
-        base: nodriver.Tab | nodriver.Browser | None = None,
-        new_window: bool = False,
-        new_tab: bool = False,
-        new_context: bool = True,
-        initial_url: str = "about:blank",
-    ) -> nodriver.Tab:
-        """central factory for new/reused tabs/windows/contexts.
-
-        honors combinations of `new_window`/`new_tab`/`new_context` and falls back to `self.browser`.
-
-        :param base: existing tab or browser (defaults to browser root).
-        :param new_window: request a separate window (may create context).
-        :param new_tab: request a new tab in existing window/context.
-        :param new_context: create an isolated context when opening window.
-        :param initial_url: initial navigation (about:blank by default).
-        :return: acquired tab
-        :rtype: nodriver.Tab
-        """
-        # central place to create/reuse tabs/windows/contexts
-        if base is None:
-            base = self.browser
-        # context+window: gives us isolated storage and a dedicated window
-        if new_window and new_context:
-            try:
-                tab = await self.browser.create_context(initial_url, new_window=True)
-                return tab
-            except Exception:
-                logger.exception("failed creating context window; falling back to plain window")
-        # new standalone window without context
-        if new_window and isinstance(base, nodriver.Browser):
-            return await base.get(initial_url, new_tab=False, new_window=True)
-        # open new tab off a browser root
-        if new_tab and isinstance(base, nodriver.Browser):
-            return await base.get(initial_url, new_tab=True)
-        # base is a tab: delegate; when asking for a new tab it will bubble to browser
-        if isinstance(base, nodriver.Tab):
-            return await base.get(initial_url, new_tab=new_tab, new_window=new_window)
-        # fallback: main tab
-        return self.browser.main_tab
 
 
     async def crawl(self,
@@ -289,7 +226,7 @@ class NodriverPlus:
             url, depth, concurrency, max_pages, delay_range,
         )
 
-        root_url = self.fix_url(url)
+        root_url = fix_url(url)
         depth = max(0, depth)
         concurrency = max(1, concurrency)
 
@@ -320,7 +257,7 @@ class NodriverPlus:
             if remaining < 0:
                 return False
             try:
-                link_canon = self.fix_url(link)
+                link_canon = fix_url(link)
             except Exception:
                 return False
             if link_canon in visited or link_canon in all_links_set:
@@ -338,7 +275,7 @@ class NodriverPlus:
         instance: nodriver.Tab | nodriver.Browser = self.browser
         if new_window:
             # create a dedicated browser context + window; tabs we spawn will stay in this context
-            instance = await self.acquire_tab(new_window=True, new_context=True)
+            instance = await acquire_tab(self.browser, new_window=True, new_context=True)
 
         async def worker(idx: int):  # noqa: ARG001
             nonlocal pages_processed
@@ -424,7 +361,7 @@ class NodriverPlus:
                         # record the final URL if the page redirected
                         final_url = getattr(scrape_response, "url", None) or (scrape_response.tab.url if scrape_response.tab else current_url)
                         try:
-                            final_url = self.fix_url(final_url)
+                            final_url = fix_url(final_url)
                         except Exception:
                             final_url = final_url or current_url
 
@@ -447,7 +384,7 @@ class NodriverPlus:
                             if max_pages is not None and pages_processed >= max_pages:
                                 break
                             if await should_enqueue(link, next_remaining):
-                                await queue.put((self.fix_url(link), next_remaining))
+                                await queue.put((fix_url(link), next_remaining))
                 except Exception as e:
                     failed_links.append(FailedLink(current_url, False, e))
                     logger.exception("unexpected error during crawl for %s", current_url)
@@ -540,7 +477,7 @@ class NodriverPlus:
         start = time.monotonic()
         pending_tasks: set[asyncio.Task] = set()
         target = existing_tab or self.browser
-        url = self.fix_url(url)
+        url = fix_url(url)
 
         scrape_response = ScrapeResponse(url)
         parsed_url = urlparse(url)
@@ -548,8 +485,8 @@ class NodriverPlus:
         if target is None:
             raise ValueError("browser was never started! start with `NodriverPlus.start(**kwargs)`")
         # central acquisition
-        tab = await self.acquire_tab(
-            base=target, 
+        tab = await acquire_tab(
+            target, 
             new_window=new_window, 
             new_tab=new_tab, 
         )
@@ -606,7 +543,7 @@ class NodriverPlus:
 
             # prefer the tab's final URL (handles redirects) and record it on the ScrapeResponse
             final_url = nav_response.tab.url if getattr(nav_response, "tab", None) and nav_response.tab.url else url
-            scrape_response.url = self.fix_url(final_url)
+            scrape_response.url = fix_url(final_url)
 
             # if it's taking forever to load, get_content() will also take forever to load
             if scrape_response.timed_out_loading:
@@ -958,8 +895,13 @@ class NodriverPlus:
         base = tab
         if new_tab or new_window:
             try:
-                base = await self.acquire_tab(base=tab if isinstance(tab, nodriver.Tab) else None,
-                    new_window=new_window, new_tab=new_tab, new_context=new_window, initial_url="about:blank")
+                base = await acquire_tab(
+                    tab if isinstance(tab, nodriver.Tab) else self.browser,
+                    "about:blank",
+                    new_window=new_window,
+                    new_tab=new_tab,
+                    new_context=new_window,
+                )
             except Exception:
                 logger.exception("failed acquiring tab; falling back to provided target")
         nav_task = asyncio.create_task(base.get(url))
@@ -998,16 +940,7 @@ class NodriverPlus:
         scrape_response.timed_out = False
         scrape_response.elapsed = timedelta(seconds=time.monotonic() - start)
         return scrape_response
-
-    def fix_url(self, url: str):
-        """make the url more like how chrome would make it
-
-        :param url: raw url.
-        :return: fixed url
-        :rtype: str
-        """
-        return urlcanon.google.canonicalize(url).__str__()
-
+    
 
     async def stop(self, graceful = True):
         """stop browser process (optionally wait for graceful exit).

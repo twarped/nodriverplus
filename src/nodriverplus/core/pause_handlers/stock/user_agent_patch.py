@@ -1,7 +1,7 @@
 import logging
 import nodriver
 from nodriver import cdp
-from ..target_interceptors import TargetInterceptor
+from ..targets import TargetInterceptor
 from ...connection import send_cdp
 from ...user_agent import UserAgent
 from ...cdp_helpers import can_use_domain
@@ -77,7 +77,7 @@ async def patch_user_agent(
     else:
         logger.info("successfully patched user agent for %s with domains %s", msg, domains_patched)
 
-class UserAgentInterceptor(TargetInterceptor):
+class UserAgentPatch(TargetInterceptor):
     """
     stock `TargetInterceptor` for patching user agents
     """

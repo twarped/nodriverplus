@@ -1,7 +1,7 @@
 from nodriver import cdp
 import nodriver
 import logging
-from ..target_interceptors import TargetInterceptor
+from ..targets import TargetInterceptor
 from ....js.load import load_text as load_js
 from ...cdp_helpers import can_use_domain
 from ...connection import send_cdp
@@ -54,7 +54,7 @@ async def apply_stealth(
     else:
         logger.info("successfully applied patch to %s", msg)
 
-class StealthInterceptor(TargetInterceptor):
+class StealthPatch(TargetInterceptor):
     """stock `TargetInterceptor` for applying stealth patches to targets.
 
     utilizes `apply_stealth()` to inject js stealth patches into a connection target

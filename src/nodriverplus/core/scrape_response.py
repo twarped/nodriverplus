@@ -1,5 +1,5 @@
 import asyncio
-from typing import Callable, Coroutine
+from typing import Callable, Awaitable
 import nodriver
 from datetime import datetime, timedelta
 
@@ -50,7 +50,7 @@ class ScrapeResponse:
     """primary result object for a single page scrape.
 
     holds html, optional raw bytes (for non-text main resource), link list, timing + timeout flags,
-    headers + mime, and per-request/response interception metadata.
+    headers + mime, redirect chain, and per-request/response interception metadata.
 
     fields are intentionally public and lightly typed for handler mutation.
 
@@ -65,6 +65,7 @@ class ScrapeResponse:
     :param headers: main response headers (lowercased keys).
     :param intercepted_responses: map of url->ScrapeResponseIntercepted.
     :param intercepted_requests: map of url->ScrapeRequestIntercepted.
+    :param redirect_chain: ordered list of redirect target locations (raw values from Location headers).
     :param elapsed: timedelta duration of the scrape.
     """
     url: str
@@ -80,6 +81,7 @@ class ScrapeResponse:
     headers: dict
     intercepted_responses: dict[str, ScrapeResponseIntercepted]
     intercepted_requests: dict[str, ScrapeRequestIntercepted]
+    redirect_chain: list[str]
     elapsed: timedelta | None
     def __init__(self, 
         url: str = None, 
@@ -93,6 +95,7 @@ class ScrapeResponse:
         headers: dict = None, 
         intercepted_responses: dict[str, ScrapeResponseIntercepted] = {},
         intercepted_requests: dict[str, ScrapeRequestIntercepted] = {},
+        redirect_chain: list[str] = [],
         elapsed: timedelta | None = None
     ):
         self.url = url
@@ -106,6 +109,7 @@ class ScrapeResponse:
         self.headers = headers
         self.intercepted_responses = intercepted_responses
         self.intercepted_requests = intercepted_requests
+        self.redirect_chain = redirect_chain
         self.elapsed = elapsed
 
 
@@ -186,11 +190,11 @@ class ScrapeResponseHandler:
     
 
     def __init__(self,
-        timed_out: Callable[[ScrapeResponse], Coroutine[None, None, list[str] | None] | list[str] | None] = None,
-        html: Callable[[ScrapeResponse], Coroutine[None, None, None] | None] = None,
-        bytes_: Callable[[ScrapeResponse], Coroutine[None, None, None] | None] = None,
-        links: Callable[[ScrapeResponse], Coroutine[None, None, list[str]] | list[str]] = None,
-        handle: Callable[[ScrapeResponse], Coroutine[None, None, list[str] | None] | list[str] | None] = None
+        timed_out: Callable[[ScrapeResponse], Awaitable[None] | None] = None,
+        html: Callable[[ScrapeResponse], Awaitable[None] | None] = None,
+        bytes_: Callable[[ScrapeResponse], Awaitable[None] | None] = None,
+        links: Callable[[ScrapeResponse], Awaitable[list[str]] | list[str]] = None,
+        handle: Callable[[ScrapeResponse], Awaitable[list[str] | None] | list[str] | None] = None
     ):
         """optional injection of hook functions.
 
@@ -287,7 +291,7 @@ class CrawlResultHandler:
         """
         pass
 
-    def __init__(self, handle: Callable[[CrawlResult], Coroutine[any, any, None] | None] | None = None):
+    def __init__(self, handle: Callable[[CrawlResult], Awaitable[any] | None] | None = None):
         """allows for custom handling of crawl results during a queued crawl.
         (NodriverPlusManager)
 
