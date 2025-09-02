@@ -87,18 +87,19 @@ from nodriverplus import NodriverPlus, ScrapeResponseHandler
 ndp = NodriverPlus()
 await ndp.start() # headless or headful
 
-def handle_html(response):
-    print(response.html[:500])
-def handle_links(response):
-    links_to_crawl = []
-    for link in response.links:
+class MyCustomHandler(ScrapeResponseHandler):
+
+    async def html(self, response):
+        print(response.html[:500])
+
+    async def links(self, response):
+        links_to_crawl = []
+        for link in response.links:
         links_to_crawl.append(link)
-    print(f"found {len(links_to_crawl)} links to crawl")
-    return links_to_crawl
+        print(f"found {len(links_to_crawl)} links to crawl")
+        return links_to_crawl
 
-handler = ScrapeResponseHandler(html=handle_html, links=handle_links)
-
-result = await ndp.crawl("https://example.com", depth=2, handler=handler)
+result = await ndp.crawl("https://example.com", depth=2, handler=MyCustomHandler())
 
 await ndp.stop()
 ```
@@ -121,30 +122,29 @@ manager = NodriverPlusManager(ndp, concurrency=2)
 manager.start()
 
 # simple result handlers
-def handle_html(response):
-    print(response.html[:500])
-def handle_crawl_result(result):
-    print(f"successfully crawled {len(result.successful_links)}")
+class ScrapeHandler(ScrapeResponseHandler):
+    async def html(self, response):
+        print(response.html[:500])
 
-# create a new `ScrapeResponseHandler`
-scrape_response_handler = ScrapeResponseHandler(html=handle_html)
-# create a new `CrawlResultHandler`
-# special handler only used by `NodriverPlusManager` as of now
-crawl_result_handler = CrawlResultHandler(handle=handle_crawl_result)
+class CrawlHandler(CrawlResultHandler):
+    async def handle(self, result):
+        print(f"successfully crawled {len(result.successful_links)}")
 
 # enqueue a crawl
 await manager.enqueue_crawl("https://example.com",
-    scrape_response_handler=scrape_response_handler,
-    crawl_result_handler=crawl_result_handler
+    scrape_response_handler=ScrapeHandler(),
+    crawl_result_handler=CrawlHandler()
 )
+
 # enqueue another crawl
 await manager.enqueue_crawl("https://example.com",
-    scrape_response_handler=scrape_response_handler,
-    crawl_result_handler=crawl_result_handler
+    scrape_response_handler=ScrapeHandler(),
+    crawl_result_handler=CrawlHandler()
 )
+
 # enqueue a scrape
 await manager.enqueue_scrape("https://example.com",
-    scrape_response_handler=scrape_response_handler
+    scrape_response_handler=ScrapeHandler()
 )
 
 # optional:

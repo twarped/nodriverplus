@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 class RequestPausedHandler:
     """orchestrates request/response interception for a single tab.
 
+    **note**: can remove the `Range` header from requests in `_annotate_request_navigation()`
+
     lifecycle (request phase):
     1. `on_request(ev)` - inspect / prep state
     2. predicates in order: fail -> fulfill -> stream -> continue
@@ -53,9 +55,11 @@ class RequestPausedHandler:
 
     tab: nodriver.Tab
     tasks: set[asyncio.Task]
+    remove_range_header: bool
 
-    def __init__(self, tab: nodriver.Tab):
+    def __init__(self, tab: nodriver.Tab, remove_range_header = True):
         self.tab = tab
+        self.remove_range_header = remove_range_header
         self.tasks = set()
         # per-requestId navigation contexts (one logical chain per active id)
         # nav_contexts[request_id] = { current, chain, final, done }
@@ -79,8 +83,12 @@ class RequestPausedHandler:
         meta["request_url"] = ev.request.url
         meta["nav_request_id"] = ev.request_id
         meta["is_main_candidate"] = (ev.request.url == ctx["current"] and not ctx["done"])
-        if meta["is_main_candidate"]:
-            setattr(ev, "intercept_response", True)
+        # remove Range header to avoid servers sending 206 partial responses
+        if self.remove_range_header:
+            for k in list(ev.request.headers.keys()):
+                if k.lower() == "range":
+                    ev.request.headers.pop(k, None)
+
 
 
     # helper for tracking response redirects
@@ -121,15 +129,11 @@ class RequestPausedHandler:
         meta["nav_request_id"] = ev.request_id
 
         if is_main and is_redirect and location:
-            try:
-                from urllib.parse import urljoin
-                redirect_target = urljoin(ev.request.url, location)
-                meta["redirect_target"] = redirect_target
-                async with self._nav_lock:
-                    ctx["chain"].append(redirect_target)
-                    ctx["current"] = redirect_target
-            except Exception:
-                pass
+            from urllib.parse import urljoin
+            redirect_target = urljoin(ev.request.url, location)
+            meta["redirect_target"] = redirect_target
+            async with self._nav_lock:
+                ctx["chain"].append(redirect_target)
             return True
         if is_main and not is_redirect and not ctx["done"]:
             async with self._nav_lock:
@@ -214,7 +218,6 @@ class RequestPausedHandler:
 
         :param ev: interception event containing response parameters (MUTATED PRIOR).
         """
-        logger.info("fulfilling request: %s", ev.request.url)
         await self.tab.send(
             cdp.fetch.fulfill_request(
                 ev.request_id,
@@ -222,9 +225,10 @@ class RequestPausedHandler:
                 ev.response_headers,
                 getattr(ev, 'binary_response_headers', None),
                 getattr(ev, 'body', None),
-                ev.response_status_text
+                ev.response_status_text or None
             )
         )
+        logger.debug("successfully fulfilled request for %s", ev.request.url)
 
 
     async def continue_request(self, ev: cdp.fetch.RequestPaused):
@@ -240,8 +244,8 @@ class RequestPausedHandler:
                 ev.request.url,
                 ev.request.method,
                 ev.request.post_data,
-                ev.request.headers,
-                getattr(ev, 'intercept_response', None)
+                [cdp.fetch.HeaderEntry(name=key, value=value) for key, value in ev.request.headers.items()],
+                True
             )
         )
 
@@ -251,8 +255,11 @@ class RequestPausedHandler:
 
         use when you need raw bytes (pdf, media) or want to transform before fulfill.
 
+        happens during request interception
+
         :param ev: interception event (mutable) used to decide streaming.
         :return: bool to trigger take_response_body_as_stream.
+        :rtype: bool
         """
         return False
 
@@ -311,7 +318,7 @@ class RequestPausedHandler:
         meta = getattr(ev, "meta", None)
         if meta is None:
             meta = {}
-            ev.meta = meta  # type: ignore[attr-defined]
+            ev.meta = meta
         meta["streamed"] = True
 
 
@@ -339,7 +346,7 @@ class RequestPausedHandler:
             cdp.fetch.continue_response(
                 ev.request_id,
                 ev.response_status_code,
-                ev.response_status_text,
+                ev.response_status_text or None,
                 ev.response_headers,
                 getattr(ev, 'binary_response_headers', None),
             )
@@ -358,9 +365,9 @@ class RequestPausedHandler:
         :param ev: interception event being processed (MUTATED ACROSS STEPS).
         """
         if ev.response_status_code is None:
+            logger.debug("successfully intercepted request for %s", ev.request.url)
             # annotate request navigation state before predicates
             await self._annotate_request_navigation(ev)
-            ev.network_id
             await self.on_request(ev)
             if await self.should_fail_request(ev):
                 await self.fail_request(ev)
@@ -368,12 +375,9 @@ class RequestPausedHandler:
             if await self.should_fulfill_request(ev):
                 await self.fulfill_request(ev)
                 return
-            if await self.should_take_response_body_as_stream(ev):
-                await self.take_response_body_as_stream(ev)
-                await self.fulfill_request(ev)
-                return
             await self.continue_request(ev)
         else:
+            logger.debug("successfully intercepted response for %s", ev.request.url)
             # annotate response navigation
             redirect = await self._annotate_response_navigation(ev)
             await self.on_response(ev)
@@ -391,7 +395,7 @@ class RequestPausedHandler:
                     self.nav_contexts.pop(ev.request_id, None)
 
 
-    async def handle(self, ev: cdp.fetch.RequestPaused):
+    def handle(self, ev: cdp.fetch.RequestPaused):
         """public entry: schedule `_handle` as a task for async concurrency.
 
         :param ev: interception event queued for processing.
@@ -401,12 +405,20 @@ class RequestPausedHandler:
         task.add_done_callback(lambda t: self.tasks.discard(t))
 
 
+    def __call__(self, ev: cdp.fetch.RequestPaused):
+        self.handle(ev)
+
+
     async def wait_for_tasks(self):
         """await all outstanding interception tasks."""
+        logger.info("waiting for pending tasks to finish")
         await asyncio.gather(*self.tasks, return_exceptions=True)
 
 
     async def start(self):
+        """
+        start request interception on the current tab and config
+        """
         await self.tab.send(cdp.fetch.enable())
         await self.tab.send(cdp.network.enable())
         # ensure chrome always loads fresh bytes
@@ -414,11 +426,19 @@ class RequestPausedHandler:
         self.tab.add_handler(cdp.fetch.RequestPaused, self.handle)
 
 
-    async def stop(self):
-        await self.tab.remove_handler(cdp.fetch.RequestPaused, self.handle)
-        await self.wait_for_tasks()
+    async def stop(self, remove_handler = True, wait_for_tasks = True):
+        """
+        stop the request interception and wait for pending tasks if specified
+
+        :param wait_for_tasks: whether to wait for outstanding tasks to complete
+        """
+        if remove_handler:
+            await self.tab.remove_handler(cdp.fetch.RequestPaused, self.handle)
+        if wait_for_tasks:
+            await self.wait_for_tasks()
 
 
+# TODO: make this actually work
 class AuthRequiredHandler:
     """API/handler for `Fetch.authRequired` challenges.
 

@@ -35,7 +35,7 @@ class ScrapeRequestIntercepted:
     complements ScrapeResponseIntercepted for debugging / audit.
 
     :param url: request url.
-    :param headers: outgoing headers (lowercased keys; range removed).
+    :param headers: outgoing headers
     :param method: http method.
     """
     url: str
@@ -60,7 +60,7 @@ class ScrapeResponse:
     :param timed_out_navigating: navigation phase timed out.
     :param timed_out_loading: load event phase timed out.
     :param html: captured html ("" when load timeout + outerHTML fallback failed).
-    :param bytes_: raw body bytes (only for non-text types when streamed).
+    :param `bytes_`: raw body bytes (only for non-text types when streamed).
     :param mime: mime of main response.
     :param headers: main response headers (lowercased keys).
     :param intercepted_responses: map of url->ScrapeResponseIntercepted.
@@ -144,9 +144,9 @@ class ScrapeResponseHandler:
     async def bytes_(self, scrape_response: ScrapeResponse):
         """process raw bytes when non-text main response was streamed.
 
-        skip if bytes_ is None. can persist file, hash, etc.
+        skip if `bytes_` is None. can persist file, hash, etc.
 
-        :param scrape_response: response object (bytes_ may be None).
+        :param scrape_response: response object (`bytes_` may be None).
         """
         pass
 
@@ -163,62 +163,31 @@ class ScrapeResponseHandler:
     
 
     async def handle(self, scrape_response: ScrapeResponse) -> list[str] | None:
+        """main entry point for handling a scrape response.
+
+        correctly executes each step in order:
+
+        `timed_out()`
+
+        or: `html()` -> `bytes_()` -> `links()`
+
+        :param scrape_response: scrape response object
+        :return: list of links to continue crawl with.
+        :rtype: list[str] | None
+        """
         # if the response timed out, break.
         # (or continue I guess)
         if scrape_response.timed_out:
-            if asyncio.iscoroutinefunction(self.timed_out):
                 return await self.timed_out(scrape_response)
-            else:
-                return self.timed_out(scrape_response)
 
         # process the response
-        if asyncio.iscoroutinefunction(self.html):
-            await self.html(scrape_response)
-        else:
-            self.html(scrape_response)
+        await self.html(scrape_response)
         if scrape_response.bytes_:
-            if asyncio.iscoroutinefunction(self.bytes_):
-                await self.bytes_(scrape_response)
-            else:
-                self.bytes_(scrape_response)
+            await self.bytes_(scrape_response)
 
         # return the links for the crawler to follow
-        if asyncio.iscoroutinefunction(self.links):
-            return await self.links(scrape_response)
-        else:
-            return self.links(scrape_response)
+        return await self.links(scrape_response)
     
-
-    def __init__(self,
-        timed_out: Callable[[ScrapeResponse], Awaitable[None] | None] = None,
-        html: Callable[[ScrapeResponse], Awaitable[None] | None] = None,
-        bytes_: Callable[[ScrapeResponse], Awaitable[None] | None] = None,
-        links: Callable[[ScrapeResponse], Awaitable[list[str]] | list[str]] = None,
-        handle: Callable[[ScrapeResponse], Awaitable[list[str] | None] | list[str] | None] = None
-    ):
-        """optional injection of hook functions.
-
-        any provided callable replaces the corresponding method 
-        (supports sync or async except for `handle` which must be async).
-
-        :param timed_out: handler for timeout case.
-        :param html: handler after html captured.
-        :param bytes_: handler after bytes captured.
-        :type bytes_: bytes_
-        :param links: link selection handler.
-        :param handle: full override (advanced; skips built-in sequence). 
-        **must** return a list of links for crawl to continue. (empty is the end of the tree)
-        """
-        if timed_out:
-            self.timed_out = timed_out
-        if html:
-            self.html = html
-        if bytes_:
-            self.bytes_ = bytes_
-        if links:
-            self.links = links
-        if handle:
-            self.handle = handle
 
 class FailedLink:
     """record of a link that failed or timed out during crawl.
@@ -290,12 +259,3 @@ class CrawlResultHandler:
         :param result: crawl summary.
         """
         pass
-
-    def __init__(self, handle: Callable[[CrawlResult], Awaitable[any] | None] | None = None):
-        """allows for custom handling of crawl results during a queued crawl.
-        (NodriverPlusManager)
-
-        :param handle: optional custom handler for crawl results.
-        """
-        if handle:
-            self.handle = handle

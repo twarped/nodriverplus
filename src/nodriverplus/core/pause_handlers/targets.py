@@ -27,12 +27,7 @@ class TargetInterceptor:
         :type ev: AttachedToTarget | None
         """
         pass
-
-    def __init__(self, 
-        handle: Callable[[Tab | Connection, cdp.target.AttachedToTarget | None], Coroutine[any, any, None]] | None = None
-    ):
-        if handle:
-            self.handle = handle
+    
 
 class TargetInterceptorManager:
     connection: Tab | Connection
@@ -77,7 +72,6 @@ class TargetInterceptorManager:
         else:
             msg = connection
             session_id = None
-        logger.info("setting auto attach for %s", msg)
         try:
             await send_cdp(connection, "Target.setAutoAttach", {
                 "autoAttach": True,
@@ -85,8 +79,9 @@ class TargetInterceptorManager:
                 "flatten": True,
                 "filter": [{"type": t, "exclude": False} for t in types]
             }, session_id)
+            logger.debug("successfully set auto attach for %s", msg)
         except Exception:
-            logger.exception("auto attach failed for %s:", msg)
+            logger.exception("failed to set auto attach for %s:", msg)
 
 
 
@@ -121,7 +116,7 @@ class TargetInterceptorManager:
         else:
             msg = connection
             session_id = None
-        logger.info("successfully attached to %s", msg)
+        logger.debug("successfully attached to %s", msg)
         # apply interceptors
         await self.apply(ev)
         # recursive attachment
@@ -135,7 +130,7 @@ class TargetInterceptorManager:
             else:
                 logger.exception("failed to resume %s:", msg)
         else:
-            logger.info("successfully resumed %s", msg)
+            logger.debug("successfully resumed %s", msg)
 
 
     async def start(

@@ -28,7 +28,7 @@ def get_type(bytes_: bytes):
 
     recognizes pdf magic header and utf-8 decodable text; else unsupported.
 
-    :param bytes_: the byte content to analyze
+    :param `bytes_`: the byte content to analyze
     """
     if bytes_.startswith(b"%PDF-"):
         return ByteType("pdf", True)

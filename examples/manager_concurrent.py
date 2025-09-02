@@ -10,11 +10,11 @@ from nodriverplus import (
 START_URL = "https://example.com"
 
 class HtmlPreviewHandler(ScrapeResponseHandler):
-    async def html(self, response):  # type: ignore[override]
+    async def handle(self, response):
         print(response.html[:120])
 
 class ResultPrinter(CrawlResultHandler):
-    async def handle(self, result):  # type: ignore[override]
+    async def handle(self, result):
         print(f"successfully crawled {len(result.successful_links)} page(s)")
 
 async def main():

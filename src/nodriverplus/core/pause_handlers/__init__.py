@@ -7,6 +7,7 @@ from .stock import (
     patch_user_agent,
     StealthPatch,
     apply_stealth,
+    ScrapeRequestPausedHandler
 )
 
 __all__ = [
@@ -15,5 +16,6 @@ __all__ = [
     "StealthPatch",
     "apply_stealth",
     "TargetInterceptor",
-    "TargetInterceptorManager"
+    "TargetInterceptorManager",
+    "ScrapeRequestPausedHandler"
 ]

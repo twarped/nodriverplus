@@ -25,7 +25,7 @@ async def apply_stealth(
         name = "apply_stealth_worker.js"
     js = load_js(name)
     msg = f"{ev.target_info.type_} <{ev.target_info.url}>"
-    logger.info("injecting stealth patch into %s", msg)
+    logger.debug("injecting stealth patch into %s", msg)
 
     # try adding the patch to the page
     try:
@@ -36,7 +36,7 @@ async def apply_stealth(
                 "includeCommandLineAPI": True,
                 "runImmediately": True
             }, ev.session_id)
-            logger.info("successfully added script to %s", msg)
+            logger.debug("successfully added script to %s", msg)
     except Exception:
         logger.exception("failed to add script to %s:", msg)
 
@@ -52,7 +52,7 @@ async def apply_stealth(
         else:
             logger.exception("failed to patch %s:", msg)
     else:
-        logger.info("successfully applied patch to %s", msg)
+        logger.debug("successfully applied patch to %s", msg)
 
 class StealthPatch(TargetInterceptor):
     """stock `TargetInterceptor` for applying stealth patches to targets.
@@ -60,5 +60,8 @@ class StealthPatch(TargetInterceptor):
     utilizes `apply_stealth()` to inject js stealth patches into a connection target
     """
 
-    async def handle(self, connection: nodriver.Tab | nodriver.Connection, ev: cdp.target.AttachedToTarget):
+    async def handle(self, 
+        connection: nodriver.Tab | nodriver.Connection, 
+        ev: cdp.target.AttachedToTarget,
+    ):
         await apply_stealth(connection, ev)

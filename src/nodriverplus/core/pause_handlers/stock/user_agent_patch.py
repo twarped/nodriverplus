@@ -75,7 +75,7 @@ async def patch_user_agent(
     if len(domains_patched) == 0:
         logger.info("no domains available to patch user agent for %s", msg)
     else:
-        logger.info("successfully patched user agent for %s with domains %s", msg, domains_patched)
+        logger.debug("successfully patched user agent for %s with domains %s", msg, domains_patched)
 
 class UserAgentPatch(TargetInterceptor):
     """
