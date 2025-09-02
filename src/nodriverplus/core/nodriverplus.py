@@ -794,7 +794,7 @@ class NodriverPlus:
                         response_code=ev.response_status_code,
                         response_headers=ev.response_headers,
                         body=base64.b64encode(buf).decode(),
-                        response_phrase=ev.response_status_text if ev.response_status_text else None,
+                        response_phrase=getattr(ev, "response_status_text", None),
                     )
                 )
                 logger.info("successfully fulfilled response %s for %s", ev.request.url, mime)

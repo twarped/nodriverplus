@@ -1,363 +1,477 @@
+"""fetch pause interception helpers (request + auth) layered over raw `nodriver` events.
+
+adds structured async hooks around `Fetch.requestPaused` / `Fetch.authRequired` so callers can:
+- inspect / mutate request + response phases (fail, fulfill, stream, continue)
+- stream binary bodies prior to chrome consumption (e.g. pdf) then re-serve via fulfill
+- inject auth challenge responses (default or credentials) before continuing
+- stage mutations directly on the event object (`ev`) which is threaded across the decision tree
+
+design notes:
+- `ev` is treated as shared mutable state (body, headers, auth_challenge_response, etc.)
+- predicates (`should_*`) are small override points to steer control flow
+- separation of streaming (`take_response_body_as_stream`) from fulfillment keeps memory + clarity
+- tasks set prevents racy shutdown by awaiting outstanding async handler work
+"""
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import base64
 import logging
-import re
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+import asyncio
 
 import nodriver
 from nodriver import cdp
 
 logger = logging.getLogger(__name__)
 
-# data containers ------------------------------
-
-@dataclass(frozen=True)
-class RequestInterceptionConfig:
-    """static interception options (immutable)"""
-    capture_main_body: bool = True
-    set_referer: bool = True
-    text_tokens: tuple[str, ...] = ("text", "javascript", "json", "xml")
-    max_redirects: int = 10
-
-@dataclass
-class RequestInterceptionState:
-    """mutable runtime facts kept separate from config"""
-    main_url_initial: str | None = None
-    main_url_current: str | None = None
-    redirect_chain: list[str] = field(default_factory=list)
-    main_body_done: bool = False
-    main_body_bytes: bytes | None = None
-    streamed_mime: str | None = None
-    # debugging / inspection
-    requests: dict[str, dict[str, Any]] = field(default_factory=dict)
-    responses: dict[str, dict[str, Any]] = field(default_factory=dict)
-    range_chunks: list[tuple[int, bytes]] = field(default_factory=list)
-    range_total: int | None = None
-
-    def summary(self) -> dict[str, Any]:
-        return {
-            "main_url_initial": self.main_url_initial,
-            "main_url_current": self.main_url_current,
-            "redirects": len(self.redirect_chain),
-            "main_body_done": self.main_body_done,
-            "bytes": len(self.main_body_bytes) if self.main_body_bytes else 0,
-            "mime": self.streamed_mime,
-        }
-
-# hook infrastructure ---------------------
-
-Hook = Callable[..., Awaitable[any]]
-
-RE_CONTENT_RANGE = re.compile(r"bytes (\d+)-(\d+)/(\d+)")
 
 class RequestPausedHandler:
-    """fetch.requestPaused interception pipeline.
+    """orchestrates request/response interception for a single connection.
 
-    `config`: immutable options (referer, streaming policy)
+    lifecycle (request phase):
+    1. `on_request(ev)` - inspect / prep state
+    2. predicates in order: fail -> fulfill -> stream -> continue
+    3. optional stream capture mutates `ev.body` then fulfill
 
-    `state`: runtime facts (main url, redirects, body bytes, flags)
+    response phase:
+    - `on_response(ev)` then `continue_response(ev)` (override to rewrite headers/status)
 
-    `hooks`: async callables bound to phases
+    mutation contract:
+    - `ev` is mutated in-place (body, headers, etc.) and passed downstream
+    - overrides should avoid replacing `ev` wholesale; adjust fields so later steps see changes
 
-    `phases` (order):
-    - request_prepare
-    - request_sent
-    - response_headers
-    - redirect (zero+ until final)
-    - should_stream
-    - stream_start
-    - stream_complete
-    - response_done
-    - error
-    - finalize
+    extension points:
+    - override `should_*` predicates for custom logic
+    - override `handle_response_body` for post-stream transformations
 
-    default:
-    - inject referer when missing
-    - stream main non-text body
-    - track redirects
-    - assemble simple 206 ranges
-
-    usage:
-    ```
-    handler = RequestPausedHandler()
-    connection.add_handler(cdp.fetch.RequestPaused, handler.handle)
-    ```
-
-    customization: `handler.add_hook("request_prepare", fn)`
+    concurrency:
+    - each intercepted event scheduled as a Task; `wait_for_tasks()` drains them on shutdown
     """
+    # TODO:
+    # i'm not sure how `binary_response_headers` work,
+    # so some of that might need refactoring later on.
 
-    def __init__(self, *, config: RequestInterceptionConfig | None = None):
-        self.config = config or RequestInterceptionConfig()
-        self.state = RequestInterceptionState()
-        self._fetch_enabled = False
-        # phase -> list[Hook]
-        self._hooks: dict[str, list[Hook]] = {p: [] for p in (
-            "request_prepare","request_sent","response_headers","redirect",
-            "should_stream","stream_start","stream_complete",
-            "response_done","error","finalize"
-        )}
-        # install defaults
-        self._install_default_hooks()
+    connection: nodriver.Tab | nodriver.Connection
+    tasks: set[asyncio.Task]
 
-    # public properties ----------------------
-    @property
-    def main_body_bytes(self):
-        return self.state.main_body_bytes
+    def __init__(self, connection: nodriver.Tab | nodriver.Connection):
+        self.connection = connection
+        self.tasks = set()
+        # per-requestId navigation contexts (one logical chain per active id)
+        # nav_contexts[request_id] = { current, chain, final, done }
+        self.nav_contexts: dict[str, dict] = {}
+        # single lock is fine for tiny critical sections; keeps races away
+        self._nav_lock = asyncio.Lock()
 
-    @property
-    def redirect_chain(self):
-        return list(self.state.redirect_chain)
 
-    # hook registration ---------------------
-    def add_hook(self, phase: str, fn: Hook):
-        """register hook (wrap sync)"""
-        if phase not in self._hooks:
-            raise ValueError(f"unknown phase: {phase}")
-        # normalize sync -> async
-        if not callable(fn):
-            raise TypeError("hook must be callable")
-        if not hasattr(fn, "__await__"):
-            async def _wrap(*a, **k):
-                return fn(*a, **k)
-            self._hooks[phase].append(_wrap)
-        else:
-            self._hooks[phase].append(fn)  # already awaitable
+    # helper for tracking request redirects
+    async def _annotate_request_navigation(self, ev: cdp.fetch.RequestPaused):
+        async with self._nav_lock:
+            ctx = self.nav_contexts.get(ev.request_id)
+            if ctx is None:
+                # first hop for this logical chain
+                ctx = {"current": ev.request.url, "chain": [], "final": None, "done": False}
+                self.nav_contexts[ev.request_id] = ctx
+        meta = getattr(ev, "meta", None)
+        if meta is None:
+            meta = {}
+            ev.meta = meta  # type: ignore[attr-defined]
+        meta["request_url"] = ev.request.url
+        meta["nav_request_id"] = ev.request_id
+        meta["is_main_candidate"] = (ev.request.url == ctx["current"] and not ctx["done"])
+        if meta["is_main_candidate"]:
+            setattr(ev, "intercept_response", True)
 
-    # defaults -------------------------------
-    def _install_default_hooks(self):
-        """register stock hooks so handler works out of the box"""
-        self.add_hook("request_prepare", self._default_referer_injector)
-        self.add_hook("should_stream", self._default_should_stream)
-        self.add_hook("stream_complete", self._default_store_stream)
 
-    # default hook impls ---------------------
-    async def _default_referer_injector(self, 
-        headers: dict[str,str], 
-        ev: cdp.fetch.RequestPaused, 
-        state: RequestInterceptionState
-    ):
-        """inject referer once so servers with strict origin checks behave"""
-        if not self.config.set_referer:
-            return
-        if state.main_url_initial is None:
-            state.main_url_initial = ev.request.url
-            state.main_url_current = ev.request.url
-        if "referer" in headers:
-            return
-        try:
-            scheme_split = state.main_url_initial.split("://",1)
-            if len(scheme_split)==2:
-                scheme, rest = scheme_split
-                host = rest.split("/",1)[0]
-                headers["referer"] = f"{scheme}://{host}"
-        except Exception:
-            logger.debug("failed to derive referer for %s", state.main_url_initial)
+    # helper for tracking response redirects
+    async def _annotate_response_navigation(self, ev: cdp.fetch.RequestPaused) -> bool:
+        """annotate redirect + main flags for this requestId; True when redirect handled.
 
-    async def _default_should_stream(self, 
-        ev: cdp.fetch.RequestPaused, 
-        mime: str, 
-        state: RequestInterceptionState
-    ):
-        """avoid grabbing large text docs; limit to non-text main nav bodies"""
-        if not self.config.capture_main_body:
-            return False
-        if state.main_body_done:
-            return False
-        if state.main_url_current and ev.request.url != state.main_url_current:
-            return False
-        # treat as text if any token appears
-        lowered = mime.lower()
-        if any(t in lowered for t in self.config.text_tokens):
-            return False
-        return True
+        per-event meta keys:
+        - is_main
+        - is_redirect
+        - redirect_target
+        - final_main
+        - nav_request_id
+        also sets meta['purge_nav_ctx'] when final main completes so caller can delete context.
+        """
+        meta = getattr(ev, "meta", None)
+        if meta is None:
+            meta = {}
+            ev.meta = meta  # type: ignore[attr-defined]
+        async with self._nav_lock:
+            ctx = self.nav_contexts.get(ev.request_id)
+            if ctx is None:
+                # late response without prior request phase (edge) create minimal context
+                ctx = {"current": ev.request.url, "chain": [], "final": None, "done": False}
+                self.nav_contexts[ev.request_id] = ctx
+        status = ev.response_status_code or 0
+        location = None
+        if ev.response_headers:
+            for h in ev.response_headers:
+                if h.name.lower() == "location":
+                    location = h.value
+                    break
+        is_redirect = 300 <= status < 400
+        is_main = (ev.request.url == ctx["current"] and not ctx["done"]) or meta.get("is_main_candidate", False)
+        meta["is_main"] = bool(is_main)
+        meta["is_redirect"] = bool(is_redirect)
+        meta["redirect_target"] = None
+        meta["final_main"] = False
+        meta["nav_request_id"] = ev.request_id
 
-    async def _default_store_stream(self, 
-        body: bytes, 
-        ev: cdp.fetch.RequestPaused, 
-        mime: str, 
-        state: RequestInterceptionState
-    ):
-        """persist captured body so caller can read after interception completes"""
-        state.main_body_bytes = body
-        state.streamed_mime = mime
+        if is_main and is_redirect and location:
+            try:
+                from urllib.parse import urljoin
+                redirect_target = urljoin(ev.request.url, location)
+                meta["redirect_target"] = redirect_target
+                async with self._nav_lock:
+                    ctx["chain"].append(redirect_target)
+                    ctx["current"] = redirect_target
+            except Exception:
+                pass
+            return True
+        if is_main and not is_redirect and not ctx["done"]:
+            async with self._nav_lock:
+                ctx["final"] = ev.request.url
+                ctx["done"] = True
+            meta["final_main"] = True
+        return False
 
-    # core handler -----------------------------------
-    async def handle(self, connection: nodriver.Connection, ev: cdp.fetch.RequestPaused):
-        """entry point used by `connection.add_handler`"""
-        # enable fetch domain once
-        if not self._fetch_enabled:
-            await connection.send(cdp.fetch.enable())
-            self._fetch_enabled = True
 
-        try:
-            if ev.response_status_code is None:
-                await self._phase_request(connection, ev)
-            else:
-                await self._phase_response(connection, ev)
-        except Exception as exc:  # funnel to error hooks, then re-raise
-            await self._run_hooks("error", exc, ev, self.state)
-            raise
-        finally:
-            await self._run_hooks("finalize", self.state)
+    async def on_request(self, ev: cdp.fetch.RequestPaused):
+        """invoked for every paused network request phase prior to a response.
 
-    # request phase ----------------------------------
-    async def _phase_request(self, connection: nodriver.Connection, ev: cdp.fetch.RequestPaused):
-        """prepare + continue request early so response interception can fire"""
-        headers = {k.lower(): v for k,v in (ev.request.headers or {}).items()}
-        headers.pop("range", None)
-        await self._run_hooks("request_prepare", headers, ev, self.state)
-        is_main = (self.state.main_url_current or ev.request.url) == ev.request.url
-        self.state.requests[ev.request_id] = {"url": ev.request.url, "headers": headers, "main": is_main}
-        await connection.send(cdp.fetch.continue_request(
-            ev.request_id,
-            headers=[cdp.fetch.HeaderEntry(name=k, value=v) for k,v in headers.items()],
-            intercept_response=True,
-        ))
-        await self._run_hooks("request_sent", ev, self.state)
+        purpose:
+        - inspect / mutate the intercepted request event (`ev`) before deciding a control path
+        - lightweight hook for logging / future header tweaks
 
-    # response phase ---------------------------------
-    async def _phase_response(self, connection: nodriver.Connection, ev: cdp.fetch.RequestPaused):
-        """handle redirect chain or stream final body; short-circuit after capture"""
+        mutation note:
+        `ev` is a live event object that may be mutated downstream across handler steps
+        (e.g. body injection, auth challenge response). we treat it as state passed through
+        the decision tree.
 
-        response_headers = {h.name.lower(): h.value for h in ev.response_headers}
-        mime = response_headers.get("content-type", "").split(";",1)[0].strip().lower()
-        await self._run_hooks("response_headers", ev, mime, response_headers, self.state)
+        :param ev: cdp.fetch.RequestPaused interception event (MUTATED IN-PLACE ACROSS FLOW).
+        """
+        pass
 
-        # redirect handling
-        if self._is_redirect(ev):
-            await self._handle_redirect(connection, ev, response_headers)
-            return
 
-        # decide streaming
-        should_stream = await self._run_first_bool("should_stream", ev, mime, self.state)
-        if not should_stream:
-            await self._continue_response(connection, ev)
-            await self._run_hooks("response_done", ev, mime, self.state)
-            return
+    async def should_fail_request(self, ev: cdp.fetch.RequestPaused) -> bool:
+        """predicate deciding whether to abort the request.
 
-        # stream main body
-        await self._run_hooks("stream_start", ev, mime, self.state)
-        body = await self._stream_body(connection, ev, response_headers)
-        self.state.main_body_done = True
-        self.state.streamed_mime = mime
-        await self._run_hooks("stream_complete", body, ev, mime, self.state)
-        await self._run_hooks("response_done", ev, mime, self.state)
+        return True to short-circuit and send a fail_request; default False keeps it flowing.
 
-    # helpers -----------------------------------
-    async def _continue_response(self, connection: nodriver.Connection, ev: cdp.fetch.RequestPaused):
-        """release non-streamed interception so chrome can proceed"""
-        try:
-            await connection.send(cdp.fetch.continue_response(ev.request_id))
-        except Exception as exc:
-            if not self._is_benign(exc):
-                logger.exception("continue_response error for %s:", ev.request.url)
+        :param ev: interception event (mutable) used for decision logic.
+        :return: bool flag to trigger fail_request.
+        """
+        return False
+    
 
-    def _is_redirect(self, ev: cdp.fetch.RequestPaused) -> bool:
-        """gate redirect logic to main nav so we don't chase subresource redirects"""
-        return bool(
-            ev.response_status_code 
-            and 300 <= ev.response_status_code < 400 
-            and self._is_main_request(ev)
+    # TODO:
+    # should it be `response_error_reason` or `error_reason`?
+    # or even `request_error_reason`?
+    async def fail_request(self, ev: cdp.fetch.RequestPaused):
+        """send a Fetch.failRequest CDP command for the paused request.
+
+        assumes `ev.response_error_reason` is populated / acceptable to chrome.
+
+        mutation note: `ev` not mutated here; we only read its fields.
+
+        :param ev: interception event slated for failure.
+        """
+        await self.connection.send(
+            cdp.fetch.fail_request(
+                ev.request_id,
+                ev.response_error_reason
+            )
         )
 
-    def _is_main_request(self, ev: cdp.fetch.RequestPaused) -> bool:
-        """identify evolving main nav across redirects"""
-        return (self.state.main_url_current or ev.request.url) == ev.request.url
 
-    async def _handle_redirect(self, 
-        connection: nodriver.Connection, 
-        ev: cdp.fetch.RequestPaused, 
-        headers: dict[str,str]
-    ):
-        """update redirect chain and continue without streaming interim body"""
-        loc = headers.get("location")
-        old = self.state.main_url_current or ev.request.url
-        if loc:
-            self.state.redirect_chain.append(loc)
-            self.state.main_url_current = loc
-            if len(self.state.redirect_chain) > self.config.max_redirects:
-                raise RuntimeError(f"redirect limit exceeded ({self.config.max_redirects}) for {old}")
-            await self._run_hooks("redirect", old, loc, ev, self.state)
-        await self._continue_response(connection, ev)
+    async def should_fulfill_request(self, ev: cdp.fetch.RequestPaused) -> bool:
+        """predicate controlling full synthetic response injection.
 
-    async def _stream_body(self, 
-        connection: nodriver.Connection, 
-        ev: cdp.fetch.RequestPaused, 
-        response_headers: dict[str,str]
+        return True when we intend to build / modify a response via fulfill_request.
+
+        :param ev: interception event (mutable) you may pre-populate with body / headers.
+        :return: bool flag to trigger fulfill_request.
+        """
+        return False
+    
+
+    # TODO:
+    # should it be `response_status_code` or `response_code`?
+    # should it be `response_status_text` or `response_phrase`?
+    async def fulfill_request(self, ev: cdp.fetch.RequestPaused):
+        """issue Fetch.fulfillRequest with fields extracted from `ev`.
+
+        expected `ev` state:
+        - response_status_code: int status to emit
+        - response_headers: list[HeaderEntry]
+        - binary_response_headers (optional)
+        - body (optional base64) — mutated previously (e.g. by streaming helpers)
+
+        mutation note: body / headers may have been set by earlier steps (e.g. stream capture).
+
+        :param ev: interception event containing response parameters (MUTATED PRIOR).
+        """
+        logger.info("fulfilling request: %s", ev.request.url)
+        await self.connection.send(
+            cdp.fetch.fulfill_request(
+                ev.request_id,
+                ev.response_status_code,
+                ev.response_headers,
+                getattr(ev, 'binary_response_headers', None),
+                getattr(ev, 'body', None),
+                ev.response_status_text
+            )
+        )
+
+
+    async def continue_request(self, ev: cdp.fetch.RequestPaused):
+        """allow the original request to proceed untouched (or lightly adjusted).
+
+        can optionally mutate `ev.request` before continuing.
+
+        :param ev: interception event referencing the paused network request.
+        """
+        await self.connection.send(
+            cdp.fetch.continue_request(
+                ev.request_id,
+                ev.request.url,
+                ev.request.method,
+                ev.request.post_data,
+                ev.request.headers,
+                getattr(ev, 'intercept_response', None)
+            )
+        )
+
+
+    async def should_take_response_body_as_stream(self, ev: cdp.fetch.RequestPaused) -> bool:
+        """predicate for streaming response bodies before chrome consumes them.
+
+        use when you need raw bytes (pdf, media) or want to transform before fulfill.
+
+        :param ev: interception event (mutable) used to decide streaming.
+        :return: bool to trigger take_response_body_as_stream.
+        """
+        return False
+
+
+    async def handle_response_body_stream(self,
+        ev: cdp.fetch.RequestPaused,
+        stream: cdp.io.StreamHandle
     ):
-        """capture main nav body before chrome consumes it then replay"""
-        stream = await connection.send(cdp.fetch.take_response_body_as_stream(ev.request_id))
+        """read an IO stream into memory and attach base64 body onto `ev`.
+
+        flow:
+        1. iteratively read chunks via IO.read
+        2. decode base64 when flagged (cdp returns a pair (b64flag,data,...))
+        3. aggregate, then assign `ev.body` (base64 re-encoded)
+
+        mutation note: sets `ev.body` which later fulfill_request reuses.
+
+        :param ev: interception event mutated with body.
+        :param stream: stream handle from Fetch.takeResponseBodyAsStream.
+        """
         buf = bytearray()
         while True:
-            b64, data, eof = await connection.send(cdp.io.read(handle=stream))
-            buf.extend(base64.b64decode(data) if b64 else data.encode())
+            b64, data, eof = await self.connection.send(cdp.io.read(handle=stream))
+            buf.extend(base64.b64decode(data) if b64 else bytes(data, "utf-8"))
             if eof: break
-        await connection.send(cdp.io.close(handle=stream))
+        ev.body = base64.b64encode(buf).decode()
 
-        # assemble ranges when server sends content-range
-        cr = response_headers.get("content-range")
-        if cr:
-            m = RE_CONTENT_RANGE.match(cr)
-            if m:
-                start = int(m.group(1)); end = int(m.group(2)); total = int(m.group(3))
-                self.state.range_chunks.append((start, bytes(buf)))
-                if self.state.range_total is None:
-                    self.state.range_total = total
-                # if accumulated length >= total attempt assembly
-                acc = sum(len(c) for _, c in self.state.range_chunks)
-                if acc >= self.state.range_total:
-                    assembled = bytearray(self.state.range_total)
-                    for s, chunk in sorted(self.state.range_chunks, key=lambda x: x[0]):
-                        assembled[s:s+len(chunk)] = chunk
-                    body_bytes = bytes(assembled)
-                else:
-                    body_bytes = bytes(buf)
-            else:
-                body_bytes = bytes(buf)
-        else:
-            body_bytes = bytes(buf)
 
-        # fulfill so page still receives body
-        try:
-            await connection.send(cdp.fetch.fulfill_request(
+    async def on_stream_finished(self, ev: cdp.fetch.RequestPaused):
+        """optional override for managing `ev.body` before fulfillment
+        without having to modify `take_response_body_as_stream()` or
+        `handle_response_body_stream()`.
+
+        :param ev: interception event mutated with body.
+        """
+        pass
+
+
+    async def take_response_body_as_stream(self, ev: cdp.fetch.RequestPaused):
+        """wrapper performing takeResponseBodyAsStream + buffering + closure.
+
+        mutation note: attaches processed base64 body to `ev.body` for subsequent fulfill.
+
+        override `on_stream_finished()` to easily access or modify `ev.body` before
+        fulfillment without modifying this function or `handle_response_body_stream()`.
+
+        :param ev: interception event mutated with body.
+        """
+        stream = await self.connection.send(
+            cdp.fetch.take_response_body_as_stream(ev.request_id)
+        )
+        await self.handle_response_body_stream(ev, stream)
+        await self.on_stream_finished(ev)
+        await self.connection.send(cdp.io.close(stream))
+
+
+    async def on_response(self, ev: cdp.fetch.RequestPaused):
+        """hook invoked after a response is available (response phase interception).
+
+        extend to inspect headers / status / decide transformation before continue_response.
+
+        :param ev: interception event (contains response_* fields; may be mutated).
+        """
+        pass
+
+
+    # TODO:
+    # should it be `response_status_code` or `response_code`?
+    # should it be `response_status_text` or `response_phrase`?
+    async def continue_response(self, ev: cdp.fetch.RequestPaused):
+        """resume the response flow with minimal interference.
+
+        can be overridden to rewrite headers or status before forwarding.
+
+        :param ev: interception event carrying response metadata.
+        """
+        await self.connection.send(
+            cdp.fetch.continue_response(
                 ev.request_id,
-                response_code=ev.response_status_code,
-                response_headers=ev.response_headers,
-                body=base64.b64encode(body_bytes).decode(),
-                response_phrase=ev.response_status_text if ev.response_status_text else None,
-            ))
-        except Exception as exc:
-            if not self._is_benign(exc):
-                logger.exception("fulfill_request error for %s:", ev.request.url)
-        self.state.main_body_bytes = body_bytes
-        return body_bytes
-
-    def _is_benign(self, exc: Exception) -> bool:
-        """filter protocol races we expect during rapid navigation/close"""
-        msg = str(exc)
-        return isinstance(exc, nodriver.ProtocolException) and (
-            "Invalid InterceptionId" in msg or "Inspected target navigated or closed" in msg or "Invalid state" in msg
+                ev.response_status_code,
+                ev.response_status_text,
+                ev.response_headers,
+                getattr(ev, 'binary_response_headers', None),
+            )
         )
 
-    # hook execution
-    async def _run_hooks(self, phase: str, *args):
-        """run all hooks; keep going even if one fails"""
-        for fn in self._hooks.get(phase, ()):
-            try:
-                await fn(*args)
-            except Exception:
-                logger.exception("hook error in phase %s", phase)
 
-    async def _run_first_bool(self, phase: str, *args) -> bool:
-        """or over bool results so any truthy hook opts-in"""
-        result: Optional[bool] = None
-        for fn in self._hooks.get(phase, ( )):
-            try:
-                val = await fn(*args)
-                if isinstance(val, bool):
-                    result = val if result is None else (result or val)
-            except Exception:
-                logger.exception("hook error in phase %s", phase)
-        return bool(result)
+    async def _handle(self, ev: cdp.fetch.RequestPaused):
+        """internal dispatcher orchestrating request vs response phases.
+
+        decision tree:
+        - if no response yet: run on_request -> predicates (fail | fulfill | stream | continue)
+        - if response: on_response -> continue_response
+
+        mutation note: `ev` may receive added fields (body, binary_response_headers, etc.).
+
+        :param ev: interception event being processed (MUTATED ACROSS STEPS).
+        """
+        if ev.response_status_code is None:
+            # annotate request navigation state before predicates
+            await self._annotate_request_navigation(ev)
+            ev.network_id
+            await self.on_request(ev)
+            if await self.should_fail_request(ev):
+                await self.fail_request(ev)
+                return
+            if await self.should_fulfill_request(ev):
+                await self.fulfill_request(ev)
+                return
+            if await self.should_take_response_body_as_stream(ev):
+                await self.take_response_body_as_stream(ev)
+                await self.fulfill_request(ev)
+                return
+            await self.continue_request(ev)
+        else:
+            # annotate response navigation
+            redirect = await self._annotate_response_navigation(ev)
+            await self.on_response(ev)
+            meta = getattr(ev, "meta", {})
+            if redirect:
+                # just pass through redirects (no streaming / fulfill)
+                await self.continue_response(ev)
+            elif meta.get("final_main") and await self.should_take_response_body_as_stream(ev):
+                await self.take_response_body_as_stream(ev)
+                await self.fulfill_request(ev)
+            else:
+                await self.continue_response(ev)
+            if meta.get("final_main"):
+                async with self._nav_lock:
+                    self.nav_contexts.pop(ev.request_id, None)
+
+
+    async def handle(self, ev: cdp.fetch.RequestPaused):
+        """public entry: schedule `_handle` as a task for async concurrency.
+
+        :param ev: interception event queued for processing.
+        """
+        task = asyncio.create_task(self._handle(ev))
+        self.tasks.add(task)
+        task.add_done_callback(lambda t: self.tasks.discard(t))
+
+
+    async def wait_for_tasks(self):
+        """await all outstanding interception tasks."""
+        await asyncio.gather(*self.tasks, return_exceptions=True)
+
+
+class AuthRequiredHandler:
+    """API/handler for `Fetch.authRequired` challenges.
+
+    flow:
+    1. `on_auth_required(ev)` attaches an auth_challenge_response (mutates `ev`)
+    2. `continue_with_auth(ev)` sends decision to chrome
+
+    mutation contract:
+    - `ev.auth_challenge_response` is set in-place; callers can override to provide credentials
+
+    concurrency mirrors RequestPausedHandler: events become Tasks tracked in `tasks`.
+    """
+
+    connection: nodriver.Tab | nodriver.Connection
+    tasks: set[asyncio.Task]
+
+    def __init__(self, connection: nodriver.Tab | nodriver.Connection):
+        self.connection = connection
+        self.tasks = set()
+
+
+    async def on_auth_required(self, ev: cdp.fetch.AuthRequired):
+        """invoked when a request triggers an authentication challenge.
+
+        default strategy: answer with a "Default" challenge response (let browser decide).
+
+        extend to inject credentials:
+        ev.auth_challenge_response = cdp.fetch.AuthChallengeResponse("ProvideCredentials", username=..., password=...)
+
+        mutation note: sets `ev.auth_challenge_response` consumed in continue_with_auth.
+
+        :param ev: auth challenge event (MUTATED with response object).
+        """
+        logger.info("auth required: %s", ev.request.url)
+        ev.auth_challenge_response = cdp.fetch.AuthChallengeResponse("Default")
+
+
+    async def continue_with_auth(self, ev: cdp.fetch.AuthRequired):
+        """issue continueWithAuth using the response prepared on `ev`.
+
+        precondition: on_auth_required must set ev.auth_challenge_response.
+
+        :param ev: auth challenge event carrying previously attached response.
+        """
+        await self.connection.send(
+            cdp.fetch.continue_with_auth(
+                ev.request_id,
+                # throw if auth_challenge_response is not present
+                ev.auth_challenge_response
+            )
+        )
+
+    
+    async def _handle(self, ev: cdp.fetch.AuthRequired):
+        """orchestrate auth flow: prepare challenge response then continue.
+
+        :param ev: auth event (MUTATED then forwarded).
+        """
+        await self.on_auth_required(ev)
+        await self.continue_with_auth(ev)
+
+
+    async def handle(self, ev: cdp.fetch.AuthRequired):
+        """public entry: schedule `_handle` as a task for async concurrency.
+
+        :param ev: auth challenge event queued for processing.
+        """
+        task = asyncio.create_task(self._handle(ev))
+        self.tasks.add(task)
+        task.add_done_callback(lambda t: self.tasks.discard(t))
+
+
+    async def wait_for_tasks(self):
+        """await all outstanding auth tasks."""
+        await asyncio.gather(*self.tasks, return_exceptions=True)
