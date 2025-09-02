@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 class RequestPausedHandler:
-    """orchestrates request/response interception for a single connection.
+    """orchestrates request/response interception for a single tab.
 
     lifecycle (request phase):
     1. `on_request(ev)` - inspect / prep state
@@ -51,11 +51,11 @@ class RequestPausedHandler:
     # i'm not sure how `binary_response_headers` work,
     # so some of that might need refactoring later on.
 
-    connection: nodriver.Tab | nodriver.Connection
+    tab: nodriver.Tab
     tasks: set[asyncio.Task]
 
-    def __init__(self, connection: nodriver.Tab | nodriver.Connection):
-        self.connection = connection
+    def __init__(self, tab: nodriver.Tab):
+        self.tab = tab
         self.tasks = set()
         # per-requestId navigation contexts (one logical chain per active id)
         # nav_contexts[request_id] = { current, chain, final, done }
@@ -179,7 +179,7 @@ class RequestPausedHandler:
 
         :param ev: interception event slated for failure.
         """
-        await self.connection.send(
+        await self.tab.send(
             cdp.fetch.fail_request(
                 ev.request_id,
                 ev.response_error_reason
@@ -215,7 +215,7 @@ class RequestPausedHandler:
         :param ev: interception event containing response parameters (MUTATED PRIOR).
         """
         logger.info("fulfilling request: %s", ev.request.url)
-        await self.connection.send(
+        await self.tab.send(
             cdp.fetch.fulfill_request(
                 ev.request_id,
                 ev.response_status_code,
@@ -234,7 +234,7 @@ class RequestPausedHandler:
 
         :param ev: interception event referencing the paused network request.
         """
-        await self.connection.send(
+        await self.tab.send(
             cdp.fetch.continue_request(
                 ev.request_id,
                 ev.request.url,
@@ -275,7 +275,7 @@ class RequestPausedHandler:
         """
         buf = bytearray()
         while True:
-            b64, data, eof = await self.connection.send(cdp.io.read(handle=stream))
+            b64, data, eof = await self.tab.send(cdp.io.read(handle=stream))
             buf.extend(base64.b64decode(data) if b64 else bytes(data, "utf-8"))
             if eof: break
         ev.body = base64.b64encode(buf).decode()
@@ -301,12 +301,18 @@ class RequestPausedHandler:
 
         :param ev: interception event mutated with body.
         """
-        stream = await self.connection.send(
+        stream = await self.tab.send(
             cdp.fetch.take_response_body_as_stream(ev.request_id)
         )
         await self.handle_response_body_stream(ev, stream)
         await self.on_stream_finished(ev)
-        await self.connection.send(cdp.io.close(stream))
+        await self.tab.send(cdp.io.close(stream))
+        # mark streamed so we never double-handle body on late races
+        meta = getattr(ev, "meta", None)
+        if meta is None:
+            meta = {}
+            ev.meta = meta  # type: ignore[attr-defined]
+        meta["streamed"] = True
 
 
     async def on_response(self, ev: cdp.fetch.RequestPaused):
@@ -329,7 +335,7 @@ class RequestPausedHandler:
 
         :param ev: interception event carrying response metadata.
         """
-        await self.connection.send(
+        await self.tab.send(
             cdp.fetch.continue_response(
                 ev.request_id,
                 ev.response_status_code,
@@ -398,6 +404,19 @@ class RequestPausedHandler:
     async def wait_for_tasks(self):
         """await all outstanding interception tasks."""
         await asyncio.gather(*self.tasks, return_exceptions=True)
+
+
+    async def start(self):
+        await self.tab.send(cdp.fetch.enable())
+        await self.tab.send(cdp.network.enable())
+        # ensure chrome always loads fresh bytes
+        await self.tab.send(cdp.network.set_cache_disabled(True))
+        self.tab.add_handler(cdp.fetch.RequestPaused, self.handle)
+
+
+    async def stop(self):
+        await self.tab.remove_handler(cdp.fetch.RequestPaused, self.handle)
+        await self.wait_for_tasks()
 
 
 class AuthRequiredHandler:
@@ -475,3 +494,11 @@ class AuthRequiredHandler:
     async def wait_for_tasks(self):
         """await all outstanding auth tasks."""
         await asyncio.gather(*self.tasks, return_exceptions=True)
+
+
+    async def start(self):
+        pass
+
+
+    async def stop(self):
+        await self.wait_for_tasks()
