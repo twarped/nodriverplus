@@ -376,7 +376,7 @@ class NodriverPlus:
                                 # run close in its own task so a hung 
                                 # protocol `Transaction` can't block join()
                                 t = asyncio.create_task(scrape_response.tab.close())
-                                await asyncio.wait_for(t)
+                                t.add_done_callback(lambda f: logger.info("tab closed: %s", f.result()))
 
                     # scrape timed out or failed
                     if scrape_response.timed_out_navigating:

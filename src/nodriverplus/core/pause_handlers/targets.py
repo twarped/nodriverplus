@@ -73,10 +73,12 @@ class TargetInterceptorManager:
             session_id = None
         try:
             await connection.send(cdp.target.set_auto_attach(
-                autoAttach=True,
-                waitForDebuggerOnStart=True,
+                auto_attach=True,
+                wait_for_debugger_on_start=True,
                 flatten=True,
-                filter=[{"type": t, "exclude": False} for t in types]
+                filter_=cdp.target.TargetFilter(
+                    [{"type": t, "exclude": False} for t in types]
+                )
             ), session_id)
             logger.debug("successfully set auto attach for %s", msg)
         except Exception:

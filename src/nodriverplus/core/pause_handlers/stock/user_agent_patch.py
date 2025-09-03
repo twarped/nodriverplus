@@ -64,6 +64,7 @@ async def patch_user_agent(
         await connection.send(cdp.runtime.evaluate(
             expression=js.replace("//uaPatch//", uaPatch),
             include_command_line_api=True,
+            allow_unsafe_eval_blocked_by_csp=True
         ), session_id)
         domains_patched.append("Runtime")
 
