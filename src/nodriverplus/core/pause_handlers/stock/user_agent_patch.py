@@ -2,7 +2,6 @@ import logging
 import nodriver
 from nodriver import cdp
 from ..targets import TargetInterceptor
-from ...connection import send_cdp
 from ...user_agent import UserAgent
 from ...cdp_helpers import can_use_domain
 from ....js.load import load_text as load_js
@@ -44,32 +43,28 @@ async def patch_user_agent(
     domains_patched = []
 
     if can_use_domain(target_type, "Network"):
-        await send_cdp(
-            connection,
-            "Network.setUserAgentOverride", 
-            user_agent.to_json(), 
-            session_id, 
-        )
+        await connection.send(cdp.network.set_user_agent_override(
+            user_agent=user_agent.user_agent,
+            accept_language=user_agent.language,
+            platform=user_agent.platform,
+            user_agent_metadata=user_agent.metadata,
+        ), session_id)
         domains_patched.append("Network")
     if can_use_domain(target_type, "Emulation"):
-        await send_cdp(
-            connection,
-            "Emulation.setUserAgentOverride",
-            user_agent.to_json(),
-            session_id,
-        )
+        await connection.send(cdp.emulation.set_user_agent_override(
+            user_agent=user_agent.user_agent,
+            accept_language=user_agent.language,
+            platform=user_agent.platform,
+            user_agent_metadata=user_agent.metadata,
+        ), session_id)
         domains_patched.append("Emulation")
     if can_use_domain(target_type, "Runtime"):
         js = load_js("patch_user_agent.js")
         uaPatch = f"const uaPatch = {user_agent.to_json(True, True)};"
-        await send_cdp(connection,
-            "Runtime.evaluate",
-            {
-                "expression": js.replace("//uaPatch//", uaPatch),
-                "includeCommandLineAPI": True,
-            },
-            session_id
-        )
+        await connection.send(cdp.runtime.evaluate(
+            expression=js.replace("//uaPatch//", uaPatch),
+            include_command_line_api=True,
+        ), session_id)
         domains_patched.append("Runtime")
 
     if len(domains_patched) == 0:

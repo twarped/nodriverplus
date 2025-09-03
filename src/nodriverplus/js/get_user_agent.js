@@ -8,21 +8,21 @@
             'model', 'platformVersion', 'uaFullVersion', 'wow64'
         ]);
         metadata = {
-            platform: highEntropy.platform || '',
-            platform_version: highEntropy.platformVersion || '',
+            platform: uaData.platform || '',
+            platformVersion: highEntropy.platformVersion || '',
             architecture: highEntropy.architecture || '',
             model: highEntropy.model || '',
-            mobile: highEntropy.mobile || false,
-            brands: highEntropy.brands || [],
-            full_version_list: highEntropy.fullVersionList || [],
-            full_version: highEntropy.uaFullVersion || '',
+            mobile: uaData.mobile || false,
+            brands: uaData.brands || [],
+            fullVersionList: highEntropy.fullVersionList || [],
+            fullVersion: highEntropy.uaFullVersion || '',
             bitness: highEntropy.bitness || '',
             wow64: highEntropy.wow64 || false,
-            form_factors: highEntropy.formFactors || [],
+            formFactors: highEntropy.formFactors || [],
         };
     }
     return JSON.stringify({ 
-        user_agent: ua, 
+        userAgent: ua, 
         platform: navigator.platform,
         language: navigator.language,
         metadata: metadata, 

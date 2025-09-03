@@ -3,7 +3,6 @@ from typing import Callable, Coroutine
 from nodriver import cdp, Tab, Connection, Browser
 import nodriver
 from ..cdp_helpers import TARGET_DOMAINS
-from ..connection import send_cdp
 
 logger = logging.getLogger(__name__)
 
@@ -73,12 +72,12 @@ class TargetInterceptorManager:
             msg = connection
             session_id = None
         try:
-            await send_cdp(connection, "Target.setAutoAttach", {
-                "autoAttach": True,
-                "waitForDebuggerOnStart": True,
-                "flatten": True,
-                "filter": [{"type": t, "exclude": False} for t in types]
-            }, session_id)
+            await connection.send(cdp.target.set_auto_attach(
+                autoAttach=True,
+                waitForDebuggerOnStart=True,
+                flatten=True,
+                filter=[{"type": t, "exclude": False} for t in types]
+            ), session_id)
             logger.debug("successfully set auto attach for %s", msg)
         except Exception:
             logger.exception("failed to set auto attach for %s:", msg)
@@ -123,7 +122,7 @@ class TargetInterceptorManager:
         await self.set_hook(ev)
         # continue like normal
         try:
-            await send_cdp(connection, "Runtime.runIfWaitingForDebugger", session_id=session_id)
+            await connection.send(cdp.runtime.run_if_waiting_for_debugger(), session_id)
         except Exception as e:
             if "-3200" in str(e):
                 logger.warning("too slow resuming %s", msg)

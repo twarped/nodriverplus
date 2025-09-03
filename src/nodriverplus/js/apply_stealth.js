@@ -41,46 +41,6 @@
 
     const navProto = Object.getPrototypeOf(navigator);
 
-    // hide webdriver flag
-    defineNativeGetter(navProto, "webdriver", undefined);
-
-    // spoof languages
-    defineNativeGetter(navProto, "language", "en-US");
-    defineNativeGetter(navProto, "languages", ["en-US", "en"]);
-
-    // minimal chrome object
-    if (!window?.chrome) {
-        window.chrome = {
-            app: {},
-            runtime: {
-                connect: function () { return { onMessage: { addListener: function () { } } }; },
-                sendMessage: function () { },
-                getManifest: function () { return undefined; },
-                id: undefined
-            },
-            webstore: undefined
-        };
-    }
-
-    // battery API for desktop
-    if (!navigator.getBattery) {
-        const batteryManager = {
-            charging: false,
-            chargingTime: Infinity,
-            dischargingTime: Infinity,
-            level: 1
-        };
-        defineMethod(navProto, "getBattery", () => Promise.resolve(batteryManager));
-    }
-
-    // permissions API - always deny
-    if (navigator.permissions && navigator.permissions.query) {
-        const origQuery = navigator.permissions.query;
-        defineMethod(navigator.permissions, "query", (params) => {
-            return Promise.resolve({ state: "prompt", onchange: null });
-        });
-    }
-
     // screen orientation
     if (!screen.orientation) {
         defineNativeGetter(screen, "orientation", {

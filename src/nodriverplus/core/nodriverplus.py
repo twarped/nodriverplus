@@ -26,14 +26,16 @@ from .scrape_response import *
 from ..utils import extract_links, fix_url
 from . import cloudflare
 from datetime import timedelta
-from .connection import send_cdp as _send_cdp
 from .tab import acquire_tab, get_user_agent
 from .pause_handlers import TargetInterceptor, TargetInterceptorManager
 from .pause_handlers.stock import (
     UserAgentPatch, 
     StealthPatch, 
+    patch_stealth,
     patch_user_agent,
-    ScrapeRequestPausedHandler
+    ScrapeRequestPausedHandler,
+    WindowSizePatch,
+    patch_window_size,
 )
 
 logger = logging.getLogger(__name__)
@@ -85,9 +87,13 @@ class NodriverPlus:
         self.interceptor_manager = interceptor_manager
 
 
+    # TODO: make a `WindowSize` dataclass that can be passed
+    # so that users can specify other meta like
+    # `device_scale_factor`, `mobile`, and `orientation`
     async def start(self,
         config: Config | None = None,
         *,
+        window_size: tuple[int, int] | None = (1920, 1080),
         user_data_dir: PathLike | None = None,
         headless: bool | None = False,
         browser_executable_path: PathLike | None = None,
@@ -99,13 +105,19 @@ class NodriverPlus:
         expert: bool | None = None,
         **kwargs: dict | None,
     ) -> nodriver.Browser:
-        """launch a browser and prime stealth / ua state.
+        """launch a browser and prime stock interceptors.
+
+        **specify *`window_size`* to apply a global window size patch.**
+        - applies the correct `browser_args`
+        - and applies the stock `WindowSizePatch` interceptor to the browser
 
         wraps nodriver.start then optionally fetches + patches the user agent and installs
-        stealth scripts (shadow root auto-attach, navigator tweaks, etc.). returns the raw
+        stealth scripts. returns the raw
         nodriver Browser so callers can still use low-level APIs.
 
         :param config: optional pre-built Config.
+        :param window_size: optional window size to apply a global window size patch.
+        :type window_size: pixels: (width, height)
         :param user_data_dir: chrome profile dir.
         :param headless: run in headless mode (we still scrub Headless tokens later).
         :param browser_executable_path: custom chrome path.
@@ -119,6 +131,21 @@ class NodriverPlus:
         :return: started browser instance.
         :rtype: nodriver.Browser
         """
+        if window_size:
+            width, height = window_size
+            # remove any existing --window-size arg to avoid dupes
+            if browser_args is None:
+                browser_args = []
+            browser_args = [
+                arg for arg in browser_args
+                if not arg.startswith("--window-size=")
+            ]
+            browser_args.append(f"--window-size={width},{height}")
+            # add interceptor to manager
+            self.interceptor_manager.interceptors.append(
+                WindowSizePatch(width, height)
+            )
+
         self.browser = await nodriver.start(
             config,
             user_data_dir=user_data_dir,
@@ -133,12 +160,19 @@ class NodriverPlus:
             **kwargs
         )
 
+        # get user agent if none specified
         if not self.user_agent:
             user_agent = await get_user_agent(self.browser.main_tab)
             self.user_agent = user_agent
+        # just in case they added self.user_agent outside of `__init__()`
+        if not any(isinstance(i, UserAgentPatch) for i in self.interceptor_manager.interceptors):
             self.interceptor_manager.interceptors.append(
-                UserAgentPatch(user_agent, self.stealth)
+                UserAgentPatch(self.user_agent, self.stealth)
             )
+
+        # apply patches to main tab
+        await patch_stealth(self.browser.main_tab, None)
+
         await patch_user_agent(
             self.browser.main_tab, 
             None,
@@ -146,24 +180,20 @@ class NodriverPlus:
             self.stealth
         )
 
+        if window_size:
+            width, height = window_size
+            await patch_window_size(
+                self.browser.main_tab,
+                None,
+                width=width,
+                height=height,
+            )
+
         self.interceptor_manager.connection = self.browser.connection
         await self.interceptor_manager.start()
 
         self.config = self.browser.config
         return self.browser
-
-
-    async def send_cdp(
-        self,
-        method: str,
-        params: dict = {},
-        session_id: str = None,
-        connection: nodriver.Tab | nodriver.Connection = None,
-    ):
-        """wrapper of `nodriver.connection.send_cdp`"""
-
-        connection = connection or self.browser
-        return await _send_cdp(connection, method, params, session_id)
 
 
     async def crawl(self,

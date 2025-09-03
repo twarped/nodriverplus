@@ -10,7 +10,7 @@ from ..utils import fix_url, extract_links
 from ..js.load import load_text as load_js
 from .scrape_response import ScrapeResponse
 from .pause_handlers.requests import RequestPausedHandler
-from .user_agent import UserAgent, UserAgentMetadata
+from .user_agent import UserAgent
 from . import cloudflare
 
 logger = logging.getLogger(__name__)
@@ -56,7 +56,7 @@ async def acquire_tab(
 async def get_user_agent(tab: nodriver.Tab):
     """evaluate js/get_user_agent.js in a tab to extract structured user agent data.
 
-    converts returned json into UserAgent / UserAgentMetadata models.
+    converts returned json into the UserAgent model.
 
     :param tab: target tab for the operation.
     :return: structured user agent data.
@@ -64,10 +64,16 @@ async def get_user_agent(tab: nodriver.Tab):
     """
     js = load_js("get_user_agent.js")
     ua_data: dict = json.loads(await tab.evaluate(js, await_promise=True))
-    ua_data["metadata"] = UserAgentMetadata(**ua_data["metadata"]) if ua_data.get("metadata") else None
-    user_agent = UserAgent(**ua_data)
+    user_agent = UserAgent.from_json(ua_data)
     logger.info("successfully retrieved user agent from %s", tab.url)
-    logger.debug("user agent data retrieved from %s: \n%s", tab.url, user_agent.to_json())
+    logger.debug(
+        "user agent data retrieved from %s:\nua=%s\nplatform=%s\nlang=%s\nmetadata=%s",
+        tab.url,
+        user_agent.user_agent,
+        user_agent.platform,
+        user_agent.language,
+        bool(user_agent.metadata),
+    )
     return user_agent
 
 

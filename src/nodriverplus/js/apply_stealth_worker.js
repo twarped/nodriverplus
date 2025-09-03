@@ -40,11 +40,4 @@
     }
 
     const navProto = Object.getPrototypeOf(navigator);
-
-    // hide webdriver flag
-    defineNativeGetter(navProto, "webdriver", false);
-
-    // spoof languages
-    defineNativeGetter(navProto, "language", "en-US");
-    defineNativeGetter(navProto, "languages", ["en-US", "en"]);
 })();

@@ -1,6 +1,6 @@
 from nodriverplus.core.nodriverplus import NodriverPlus
 from nodriverplus.core.manager import NodriverPlusManager
-from nodriverplus.core.user_agent import UserAgent, UserAgentMetadata
+from nodriverplus.core.user_agent import UserAgent
 from nodriverplus.core.scrape_response import (
     CrawlResult, 
     CrawlResultHandler, 
@@ -19,7 +19,6 @@ __all__ = [
     "NodriverPlus",
     "NodriverPlusManager",
     "UserAgent",
-    "UserAgentMetadata",
     "ScrapeResponse",
     "ScrapeResponseHandler",
     "ScrapeResponseIntercepted",

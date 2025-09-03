@@ -4,13 +4,12 @@ import logging
 from ..targets import TargetInterceptor
 from ....js.load import load_text as load_js
 from ...cdp_helpers import can_use_domain
-from ...connection import send_cdp
 
 logger = logging.getLogger(__name__)
 
-async def apply_stealth( 
+async def patch_stealth( 
     connection: nodriver.Tab | nodriver.Connection, 
-    ev: cdp.target.AttachedToTarget
+    ev: cdp.target.AttachedToTarget | None
 ):
     """inject stealth patch into a target (runtime + early document script).
 
@@ -18,34 +17,40 @@ async def apply_stealth(
 
     :param ev: attach event describing the target.
     """
+    # handle ev == None for direct tab patching
+    if isinstance(connection, nodriver.Tab) and ev is None:
+        target_type = "tab"
+        session_id = None
+        msg = f"tab <{connection.url}>"
+    else:
+        target_type = ev.target_info.type_
+        session_id = ev.session_id
+        msg = f"{target_type} <{ev.target_info.url}>"
 
     # load and apply the stealth patch
     name = "apply_stealth.js"
-    if ev.target_info.type_ in {"service_worker", "shared_worker"}:
+    if target_type in {"service_worker", "shared_worker"}:
         name = "apply_stealth_worker.js"
     js = load_js(name)
-    msg = f"{ev.target_info.type_} <{ev.target_info.url}>"
     logger.debug("injecting stealth patch into %s", msg)
 
     # try adding the patch to the page
-    try:
-        if can_use_domain(ev.target_info.type_, "Page"):
-            await send_cdp(connection, "Page.enable", session_id=ev.session_id)
-            await send_cdp(connection, "Page.addScriptToEvaluateOnNewDocument", {
-                "source": js,
-                "includeCommandLineAPI": True,
-                "runImmediately": True
-            }, ev.session_id)
-            logger.debug("successfully added script to %s", msg)
-    except Exception:
-        logger.exception("failed to add script to %s:", msg)
+    if can_use_domain(target_type, "Page"):
+        await connection.send(cdp.page.enable(), session_id=session_id)
+        await connection.send(cdp.page.add_script_to_evaluate_on_new_document(
+            source=js,
+            include_command_line_api=True,
+            run_immediately=True
+        ), session_id)
+        logger.debug("successfully added script to %s", msg)
 
     try:
-        await send_cdp(connection, "Runtime.evaluate", {
-            "expression": js,
-            "includeCommandLineAPI": True,
-            "awaitPromise": True
-        }, session_id=ev.session_id)
+        await connection.send(cdp.runtime.evaluate(
+            expression=js,
+            include_command_line_api=True,
+            await_promise=True,
+            allow_unsafe_eval_blocked_by_csp=True
+        ), session_id=session_id)
     except Exception as e:
         if "-3200" in str(e):
             logger.warning("too slow patching %s", msg)
@@ -64,4 +69,4 @@ class StealthPatch(TargetInterceptor):
         connection: nodriver.Tab | nodriver.Connection, 
         ev: cdp.target.AttachedToTarget,
     ):
-        await apply_stealth(connection, ev)
+        await patch_stealth(connection, ev)
