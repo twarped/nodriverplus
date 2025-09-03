@@ -256,6 +256,8 @@ class CrawlResultHandler:
     async def handle(self, result: CrawlResult):
         """process finished CrawlResult (persist / summarize / metrics).
 
+        `result` is mutable and is returned by `NodriverPlus.crawl()`
+
         :param result: crawl summary.
         """
         pass

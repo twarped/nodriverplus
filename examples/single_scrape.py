@@ -1,12 +1,12 @@
 import asyncio
 from nodriverplus import NodriverPlus
 
-TARGET = "https://example.com"
+URL = "https://example.com"
 
 async def main():
     ndp = NodriverPlus()
     await ndp.start()
-    resp = await ndp.scrape(TARGET)
+    resp = await ndp.scrape(URL)
     # print a preview of the document
     print(resp.html[:500])
     await ndp.stop()

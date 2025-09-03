@@ -1,8 +1,12 @@
+import logging
 import nodriver
 
 from ..requests import RequestPausedHandler
 from ...scrape_response import ScrapeResponse, ScrapeResponseIntercepted, ScrapeRequestIntercepted
 import base64
+
+logger = logging.getLogger(__name__)
+
 
 class ScrapeRequestPausedHandler(RequestPausedHandler):
     """stock `RequestPausedHandler` created for `NodriverPlus.scrape()`
@@ -27,6 +31,7 @@ class ScrapeRequestPausedHandler(RequestPausedHandler):
     async def on_response(self, ev):
         scrape_response = self.scrape_response
         headers = {h.name.lower(): h.value for h in (ev.response_headers or [])}
+        mime = None
         ct = headers.get("content-type", "")
         if ct:
             mime = ct.split(";", 1)[0].lower().strip()

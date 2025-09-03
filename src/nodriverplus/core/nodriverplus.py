@@ -168,8 +168,9 @@ class NodriverPlus:
 
     async def crawl(self,
         url: str,
-        handler: ScrapeResponseHandler = None,
+        scrape_response_handler: ScrapeResponseHandler = None,
         depth = 1,
+        crawl_result_handler: CrawlResultHandler = None,
         *,
         new_window = False,
         scrape_bytes = True,
@@ -181,7 +182,6 @@ class NodriverPlus:
         max_pages: int | None = None,
         collect_responses: bool = False,
         delay_range: tuple[float, float] | None = None,
-        tab_close_timeout: float = 5.0,
         request_paused_handler: ScrapeRequestPausedHandler = None,
     ):
         """customizable crawl API starting at `url` up to `depth`.
@@ -189,9 +189,17 @@ class NodriverPlus:
         schedules scrape tasks with a worker pool, collects response metadata, errors,
         links, and timing. handler is invoked for each page producing optional new links.
 
+        if `crawl_result_handler` is specified, `crawl_result_handler.handle()` will 
+        be called and awaited before returning the final `CrawlResult`.
+
+        `crawl_result_handler` is nifty if you're crawling with a `NodriverPlusManager`
+        instance.
+
         :param url: root starting point.
-        :param handler: optional ScrapeResponseHandler (auto-created if None).
+        :param scrape_response_handler: optional `ScrapeResponseHandler` to be passed to `scrape()`
         :param depth: max link depth (0 means single page).
+        :param crawl_result_handler: if specified, `crawl_result_handler.handle()` 
+        will be called and awaited before returning the final `CrawlResult`.
         :param new_window: isolate crawl in new context+window when True.
         :param scrape_bytes: capture bytes stream when possible.
         :param navigation_timeout: seconds for initial navigation phase.
@@ -203,16 +211,18 @@ class NodriverPlus:
         :param collect_responses: store every ScrapeResponse object.
         :param delay_range: (min,max) jitter before first scrape per worker loop.
         :param tab_close_timeout: seconds to wait closing a tab.
-        :param wait_for_pending_fetch: await outstanding fetch interception tasks.
+        :param request_paused_handler: custom fetch interception handler.
+        **must be a type**—not an instance—so that it can be initiated later with the correct values attached
+        :type request_paused_handler: type[ScrapeRequestPausedHandler]
         :return: crawl summary
         :rtype: CrawlResult
         """
-        if handler is None:
+        if scrape_response_handler is None:
             if not collect_responses:
                 logger.warning("no handler provided and collect_responses is False, only errors and links will be captured")
             else:
                 logger.info("no handler provided, using default handler functions")
-            handler = ScrapeResponseHandler()
+            scrape_response_handler = ScrapeResponseHandler()
 
         # normalize delay range if provided
         if delay_range is not None:
@@ -277,7 +287,7 @@ class NodriverPlus:
             # create a dedicated browser context + window; tabs we spawn will stay in this context
             instance = await acquire_tab(self.browser, new_window=True, new_context=True)
 
-        async def worker(idx: int):  # noqa: ARG001
+        async def worker(idx: int):
             nonlocal pages_processed
             while True:
                 try:
@@ -313,6 +323,7 @@ class NodriverPlus:
                         current_url,
                         scrape_bytes,
                         instance,
+                        scrape_response_handler,
                         navigation_timeout=navigation_timeout,
                         wait_for_page_load=wait_for_page_load,
                         page_load_timeout=page_load_timeout,
@@ -324,32 +335,18 @@ class NodriverPlus:
                     links: list[str] = []
                     try:
                         # remember: the handler can mutate links
-                        links = await handler.handle(scrape_response) or []
+                        links = await scrape_response_handler.handle(scrape_response) or []
                     except Exception as e:
                         error_obj = e
                         logger.exception("failed running handler for %s:", current_url)
                     finally:
-                        async def _safe_close():
-                            # run close in its own task so a hung protocol txn can't block join()
-                            if not scrape_response.tab:
-                                return
-                            # avoid closing the dedicated context's primary tab twice
-                            if new_window and scrape_response.tab is instance:
-                                return
-                            t = asyncio.create_task(scrape_response.tab.close())
-                            try:
-                                await asyncio.wait_for(t, timeout=tab_close_timeout)
-                            except asyncio.TimeoutError:
-                                # target likely crashed/detached before answering Target.closeTarget
-                                logger.warning("timeout closing tab for %s after %.1fs (continuing)", current_url, tab_close_timeout)
-                                t.cancel()
-                            except Exception:
-                                logger.exception("failed closing tab for %s:", current_url)
-                        try:
-                            await _safe_close()
-                        except Exception:
-                            # never let close issues block queue progress
-                            logger.exception("unexpected error in safe close for %s", current_url)
+                        if scrape_response.tab:
+                            # avoid closing tabs twice
+                            if not (new_window and scrape_response.tab is instance):
+                                # run close in its own task so a hung 
+                                # protocol `Transaction` can't block join()
+                                t = asyncio.create_task(scrape_response.tab.close())
+                                await asyncio.wait_for(t)
 
                     # scrape timed out or failed
                     if scrape_response.timed_out_navigating:
@@ -417,7 +414,9 @@ class NodriverPlus:
                 t.cancel()
             except Exception:
                 logger.debug("failed closing dedicated context tab (already closed?)")
+
         time_end = datetime.now(UTC)
+        time_elapsed = time_end - time_start
         result = CrawlResult(
             links=all_links,
             successful_links=successful_links,
@@ -425,9 +424,15 @@ class NodriverPlus:
             timed_out_links=timed_out_links,
             time_start=time_start,
             time_end=time_end,
-            time_elapsed=time_end - time_start,
+            time_elapsed=time_elapsed,
             responses=responses,
         )
+
+        if crawl_result_handler:
+            await crawl_result_handler.handle(result)
+            result.time_end = datetime.now(UTC)
+            result.time_elapsed = result.time_end - time_start
+
         logger.info(
             "successfully finished crawl for %s (pages=%d success=%d failed=%d timed_out=%d elapsed=%.2fs)",
             url,
@@ -446,6 +451,7 @@ class NodriverPlus:
         url: str,
         scrape_bytes = True,
         existing_tab: nodriver.Tab | None = None,
+        scrape_response_handler: ScrapeResponseHandler | None = None,
         *,
         navigation_timeout = 30,
         wait_for_page_load = True,
@@ -454,26 +460,37 @@ class NodriverPlus:
         # solve_cloudflare = True, # not implemented yet
         new_tab = False,
         new_window = False,
-        request_paused_handler: ScrapeRequestPausedHandler = None,
+        request_paused_handler = ScrapeRequestPausedHandler,
     ):
         """single page scrape (html + optional bytes + link extraction).
 
         handles navigation, timeouts, fetch interception, html capture, link parsing and
         cleanup (tab closure, pending task draining).
 
+        if `scrape_response_handler` is provided, `scrape_response_handler.handle()` will
+        be called and awaited before returning the final `ScrapeResponse`.
+
+        `scrape_response_handler` could be useful if you want to execute stuff on `tab`
+        after the page loads, but before the `RequestPausedHandler` is removed
+
         :param url: target url.
         :param scrape_bytes: capture non-text body bytes.
         :param existing_tab: reuse provided tab/browser root or create fresh.
+        :param scrape_response_handler: if specified, `scrape_response_handler.handle()` will be called 
+        and awaited before returning the final `ScrapeResponse`
         :param navigation_timeout: seconds for initial navigation.
         :param wait_for_page_load: await full load event.
         :param page_load_timeout: seconds for load phase.
         :param extra_wait_ms: post-load wait for dynamic content.
         :param new_tab: request new tab.
         :param new_window: request isolated window/context.
-        :param wait_for_pending_fetches: await in-flight fetch interception tasks.
+        :param request_paused_handler: custom fetch interception handler.
+        **must be a type**—not an instance—so that it can be initiated later with the correct values attached
+        :type request_paused_handler: type[ScrapeRequestPausedHandler]
         :return: html/links/bytes/metadata
         :rtype: ScrapeResponse
         """
+        
         start = time.monotonic()
         target = existing_tab or self.browser
         url = fix_url(url)
@@ -502,10 +519,10 @@ class NodriverPlus:
         )
 
         # use the stock handler unless a custom one is provided
-        handler: ScrapeRequestPausedHandler = (request_paused_handler or ScrapeRequestPausedHandler)(
+        request_paused_handler = (request_paused_handler or ScrapeRequestPausedHandler)(
             tab, scrape_response, url, scrape_bytes
         )
-        await handler.start()
+        await request_paused_handler.start()
 
         try:
             nav_response = await self.get_with_timeout(tab, url, 
@@ -529,8 +546,6 @@ class NodriverPlus:
                 # fast path: avoid get_content() which can hang when load timed out
                 val = await scrape_response.tab.evaluate("document.documentElement.outerHTML")
                 if isinstance(val, cdp.runtime.ExceptionDetails):
-                    # capture for caller logging; keep html empty string so downstream link extraction is safe
-                    error_obj = nodriver.ProtocolException(val)
                     logger.warning("failed evaluating outerHTML for %s after load timeout; treating as empty doc", url)
                     scrape_response.html = ""
                 else:
@@ -548,6 +563,10 @@ class NodriverPlus:
             scrape_response.elapsed = timedelta(seconds=time.monotonic() - start)
             elapsed_seconds = scrape_response.elapsed.total_seconds()
             logger.exception("unexpected error during scrape for %s (elapsed=%.2fs):", url, elapsed_seconds)
+
+        if scrape_response_handler:
+            await scrape_response_handler.handle(scrape_response)
+        await request_paused_handler.stop()
 
         return scrape_response
     

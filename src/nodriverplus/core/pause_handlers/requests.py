@@ -18,11 +18,96 @@ from __future__ import annotations
 import base64
 import logging
 import asyncio
+from dataclasses import dataclass, field, asdict
 
 import nodriver
 from nodriver import cdp
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class NavigationContext:
+    """navigation context for a logical request chain.
+
+    attributes:
+    - current: the initial URL for this request chain (first hop)
+    - chain: redirect targets encountered (in order)
+    - final: final resolved URL once a non-redirect main response completes
+    - done: flag indicating the main navigation finished
+    """
+    current: str
+    chain: list[str] = field(default_factory=list)
+    final: str | None = None
+    done: bool = False
+
+
+@dataclass
+class RequestMeta:
+    """typed per-event interception metadata.
+
+    fields:
+    - request_url: url (may update across hops)
+    - nav_request_id: cdp request id
+    - is_main_candidate: set during request phase when it might become main nav
+    - is_main: resolved main navigation flag (response phase)
+    - is_redirect: this event is a redirect (3xx)
+    - redirect_target: resolved redirect location (absolute)
+    - final_main: final non-redirect main navigation completed
+    - streamed: response body captured via streaming path
+    """
+    request_url: str
+    nav_request_id: str
+    is_main_candidate: bool = False
+    is_main: bool = False
+    is_redirect: bool = False
+    redirect_target: str | None = None
+    final_main: bool = False
+    streamed: bool = False
+
+    @classmethod
+    def from_request(cls, ev: cdp.fetch.RequestPaused) -> "RequestMeta":
+        """create a RequestMeta initialized from a request-paused event.
+
+        copies the current `ev.request.url` and `ev.request_id` into a new
+        RequestMeta instance so callers can attach it to `ev.meta`.
+        """
+        return cls(request_url=ev.request.url, nav_request_id=ev.request_id)
+
+    def mark_main_candidate(self, flag: bool):
+        """mark whether this paused request is a main-navigation candidate.
+
+        flag - True when the URL appears to be the main navigation for this chain.
+        """
+        self.is_main_candidate = flag
+
+    def mark_redirect(self, target: str):
+        """record a redirect hop for this event and set the redirect target.
+
+        target - absolute redirect destination (typically urljoin result).
+        """
+        self.is_redirect = True
+        self.redirect_target = target
+
+    def mark_final_main(self):
+        """mark this event as the final non-redirect main navigation.
+
+        this flips both `final_main` and `is_main` so downstream logic can
+        decide to stream or purge context reliably.
+        """
+        self.final_main = True
+        self.is_main = True
+
+    def mark_streamed(self):
+        """indicate the response body has been captured via streaming.
+
+        used to avoid double-processing the body on races.
+        """
+        self.streamed = True
+
+    def to_dict(self):
+        """return a shallow dict representation for logging or serialization."""
+        return asdict(self)
 
 
 class RequestPausedHandler:
@@ -57,13 +142,15 @@ class RequestPausedHandler:
     tasks: set[asyncio.Task]
     remove_range_header: bool
 
+    nav_contexts: dict[str, NavigationContext]
+
     def __init__(self, tab: nodriver.Tab, remove_range_header = True):
         self.tab = tab
         self.remove_range_header = remove_range_header
         self.tasks = set()
         # per-requestId navigation contexts (one logical chain per active id)
-        # nav_contexts[request_id] = { current, chain, final, done }
-        self.nav_contexts: dict[str, dict] = {}
+        # nav_contexts[request_id] = NavigationContext
+        self.nav_contexts = {}
         # single lock is fine for tiny critical sections; keeps races away
         self._nav_lock = asyncio.Lock()
 
@@ -74,15 +161,15 @@ class RequestPausedHandler:
             ctx = self.nav_contexts.get(ev.request_id)
             if ctx is None:
                 # first hop for this logical chain
-                ctx = {"current": ev.request.url, "chain": [], "final": None, "done": False}
+                ctx = NavigationContext(current=ev.request.url)
                 self.nav_contexts[ev.request_id] = ctx
         meta = getattr(ev, "meta", None)
-        if meta is None:
-            meta = {}
-            ev.meta = meta  # type: ignore[attr-defined]
-        meta["request_url"] = ev.request.url
-        meta["nav_request_id"] = ev.request_id
-        meta["is_main_candidate"] = (ev.request.url == ctx["current"] and not ctx["done"])
+        if not isinstance(meta, RequestMeta):
+            meta = RequestMeta.from_request(ev)
+            ev.meta = meta
+        meta.request_url = ev.request.url
+        meta.nav_request_id = ev.request_id
+        meta.mark_main_candidate(ev.request.url == ctx.current and not ctx.done)
         # remove Range header to avoid servers sending 206 partial responses
         if self.remove_range_header:
             for k in list(ev.request.headers.keys()):
@@ -104,14 +191,14 @@ class RequestPausedHandler:
         also sets meta['purge_nav_ctx'] when final main completes so caller can delete context.
         """
         meta = getattr(ev, "meta", None)
-        if meta is None:
-            meta = {}
-            ev.meta = meta  # type: ignore[attr-defined]
+        if not isinstance(meta, RequestMeta):
+            meta = RequestMeta.from_request(ev)
+            ev.meta = meta
         async with self._nav_lock:
             ctx = self.nav_contexts.get(ev.request_id)
             if ctx is None:
                 # late response without prior request phase (edge) create minimal context
-                ctx = {"current": ev.request.url, "chain": [], "final": None, "done": False}
+                ctx = NavigationContext(current=ev.request.url)
                 self.nav_contexts[ev.request_id] = ctx
         status = ev.response_status_code or 0
         location = None
@@ -121,25 +208,25 @@ class RequestPausedHandler:
                     location = h.value
                     break
         is_redirect = 300 <= status < 400
-        is_main = (ev.request.url == ctx["current"] and not ctx["done"]) or meta.get("is_main_candidate", False)
-        meta["is_main"] = bool(is_main)
-        meta["is_redirect"] = bool(is_redirect)
-        meta["redirect_target"] = None
-        meta["final_main"] = False
-        meta["nav_request_id"] = ev.request_id
+        is_main = (ev.request.url == ctx.current and not ctx.done) or meta.is_main_candidate
+        meta.is_main = bool(is_main)
+        meta.is_redirect = bool(is_redirect)
+        meta.redirect_target = None
+        meta.final_main = False
+        meta.nav_request_id = ev.request_id
 
         if is_main and is_redirect and location:
             from urllib.parse import urljoin
             redirect_target = urljoin(ev.request.url, location)
-            meta["redirect_target"] = redirect_target
+            meta.mark_redirect(redirect_target)
             async with self._nav_lock:
-                ctx["chain"].append(redirect_target)
+                ctx.chain.append(redirect_target)
             return True
-        if is_main and not is_redirect and not ctx["done"]:
+        if is_main and not is_redirect and not ctx.done:
             async with self._nav_lock:
-                ctx["final"] = ev.request.url
-                ctx["done"] = True
-            meta["final_main"] = True
+                ctx.final = ev.request.url
+                ctx.done = True
+            meta.mark_final_main()
         return False
 
 
@@ -316,10 +403,10 @@ class RequestPausedHandler:
         await self.tab.send(cdp.io.close(stream))
         # mark streamed so we never double-handle body on late races
         meta = getattr(ev, "meta", None)
-        if meta is None:
-            meta = {}
-            ev.meta = meta
-        meta["streamed"] = True
+        if not isinstance(meta, RequestMeta):
+            meta = RequestMeta.from_request(ev)
+            ev.meta = meta  # type: ignore[attr-defined]
+        meta.mark_streamed()
 
 
     async def on_response(self, ev: cdp.fetch.RequestPaused):
@@ -381,16 +468,20 @@ class RequestPausedHandler:
             # annotate response navigation
             redirect = await self._annotate_response_navigation(ev)
             await self.on_response(ev)
-            meta = getattr(ev, "meta", {})
+            meta = getattr(ev, "meta", None)
             if redirect:
                 # just pass through redirects (no streaming / fulfill)
                 await self.continue_response(ev)
-            elif meta.get("final_main") and await self.should_take_response_body_as_stream(ev):
+                logger.debug("detected redirect: %s => %s", 
+                    self.nav_contexts[ev.request_id].chain[-1], 
+                    ev.request.url
+                )
+            elif isinstance(meta, RequestMeta) and meta.final_main and await self.should_take_response_body_as_stream(ev):
                 await self.take_response_body_as_stream(ev)
                 await self.fulfill_request(ev)
             else:
                 await self.continue_response(ev)
-            if meta.get("final_main"):
+            if isinstance(meta, RequestMeta) and meta.final_main:
                 async with self._nav_lock:
                     self.nav_contexts.pop(ev.request_id, None)
 
@@ -430,10 +521,11 @@ class RequestPausedHandler:
         """
         stop the request interception and wait for pending tasks if specified
 
+        :param remove_handler: whether to remove the `RequestPaused` handler
         :param wait_for_tasks: whether to wait for outstanding tasks to complete
         """
         if remove_handler:
-            await self.tab.remove_handler(cdp.fetch.RequestPaused, self.handle)
+            self.tab.remove_handler(cdp.fetch.RequestPaused, self.handle)
         if wait_for_tasks:
             await self.wait_for_tasks()
 

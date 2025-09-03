@@ -16,7 +16,7 @@ async def main():
     ndp = NodriverPlus()
     await ndp.start()
     handler = ExampleHandler()
-    result = await ndp.crawl(START_URL, depth=2, handler=handler)
+    result = await ndp.crawl(START_URL, depth=2, scrape_response_handler=handler)
     print(f"crawl finished pages={len(result.successful_links)} failed={len(result.failed_links)}")
     await ndp.stop()
 

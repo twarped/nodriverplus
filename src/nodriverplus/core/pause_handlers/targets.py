@@ -89,7 +89,7 @@ class TargetInterceptorManager:
         self,
         ev: cdp.target.AttachedToTarget | None,
     ):
-        """apply a list of target interceptors--(in order)--to 
+        """apply a list of target interceptors—(in order)—to 
         `self.connection` with the `AttachedToTarget` event if available.
 
         :param ev: the event to pass to the interceptors.

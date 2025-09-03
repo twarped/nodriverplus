@@ -77,7 +77,7 @@
     if (navigator.permissions && navigator.permissions.query) {
         const origQuery = navigator.permissions.query;
         defineMethod(navigator.permissions, "query", (params) => {
-            return Promise.resolve({ state: "denied", onchange: null });
+            return Promise.resolve({ state: "prompt", onchange: null });
         });
     }
 

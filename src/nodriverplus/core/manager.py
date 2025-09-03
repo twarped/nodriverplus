@@ -4,7 +4,10 @@ import threading
 import queue as _thread_queue
 from typing import Callable
 
+import nodriver
+
 from .nodriverplus import NodriverPlus
+from .pause_handlers import ScrapeRequestPausedHandler
 from .scrape_response import ScrapeResponseHandler, CrawlResultHandler
 
 logger = logging.getLogger(__name__)
@@ -13,10 +16,9 @@ logger = logging.getLogger(__name__)
 class ManagerJob:
     url: str
     type_: str
-    handler: ScrapeResponseHandler | CrawlResultHandler | None
     kwargs: dict
 
-    def __init__(self, url: str, type_: str, handler: ScrapeResponseHandler | CrawlResultHandler | None, kwargs: dict):
+    def __init__(self, url: str, type_: str, kwargs: dict):
         """lightweight container describing a pending unit of work.
 
         jobs sit on a thread-safe queue so producer code (maybe running in a different
@@ -24,12 +26,10 @@ class ManagerJob:
 
         :param url: target url for the operation.
         :param type_: either "crawl" or "scrape" (dispatcher uses this).
-        :param handler: optional handler instance whose .handle() will receive the result.
         :param kwargs: params forwarded to NodriverPlus.crawl/scrape.
         """
         self.url = url
         self.type_ = type_
-        self.handler = handler
         self.kwargs = kwargs
 
     def from_dict(cls, kwargs: dict):
@@ -41,7 +41,6 @@ class ManagerJob:
         return cls(
             url=kwargs["url"],
             type_=kwargs["type_"],
-            handler=kwargs["handler"],
             kwargs=kwargs["kwargs"]
         )
 
@@ -56,7 +55,7 @@ class NodriverPlusManager:
     _done_event: threading.Event
     _runner_task: asyncio.Task | None
     _bound_task: asyncio.Task | None
-    _stop_handler: Callable[[list[dict]], any] | None
+    _stop_handler: Callable[[list[ManagerJob]], any] | None
 
     def __init__(self, ndp: NodriverPlus, concurrency: int = 1):
         """orchestrates queued scrape/crawl jobs with bounded concurrency.
@@ -79,41 +78,58 @@ class NodriverPlusManager:
         self._bound_task = None
         self._stop_handler = None
 
-    async def enqueue_crawl(
-        self,
+    async def enqueue_crawl(self,
         url: str,
         scrape_response_handler: ScrapeResponseHandler = None,
-        depth: int = 1,
+        depth = 1,
         crawl_result_handler: CrawlResultHandler = None,
         *,
-        new_window: bool = False,
-        scrape_bytes: bool = True,
-        navigation_timeout: int = 30,
-        wait_for_page_load: bool = True,
-        page_load_timeout: int = 60,
-        extra_wait_ms: int = 0,
+        new_window = False,
+        scrape_bytes = True,
+        navigation_timeout = 30,
+        wait_for_page_load = True,
+        page_load_timeout = 60,
+        extra_wait_ms = 0,
         concurrency: int = 1,
         max_pages: int | None = None,
         collect_responses: bool = False,
         delay_range: tuple[float, float] | None = None,
-        tab_close_timeout: float = 5.0,
+        request_paused_handler: ScrapeRequestPausedHandler = None,
     ):
         """async wrapper that just enqueues a crawl up to `depth`.
 
         kept async so user code calling from coroutines reads naturally even though
         the body only uses the thread-safe queue.
 
-        :param crawl_result_handler: optional handler for when the enqueued crawl finishes.
+        :param url: root starting point.
+        :param scrape_response_handler: optional `ScrapeResponseHandler` to be passed to `scrape()`
+        :param depth: max link depth (0 means single page).
+        :param crawl_result_handler: if specified, `crawl_result_handler.handle()` 
+        will be called and awaited before returning the final `CrawlResult`.
+        :param new_window: isolate crawl in new context+window when True.
+        :param scrape_bytes: capture bytes stream when possible.
+        :param navigation_timeout: seconds for initial navigation phase.
+        :param wait_for_page_load: await full load event.
+        :param page_load_timeout: seconds for load phase.
+        :param extra_wait_ms: post-load settle time.
+        :param concurrency: worker concurrency.
+        :param max_pages: hard cap on processed pages.
+        :param collect_responses: store every ScrapeResponse object.
+        :param delay_range: (min,max) jitter before first scrape per worker loop.
+        :param tab_close_timeout: seconds to wait closing a tab.
+        :param request_paused_handler: custom fetch interception handler.
+        **must be a type**—not an instance—so that it can be initiated later with the correct values attached
+        :type request_paused_handler: type[ScrapeRequestPausedHandler]
         """
         # enqueue a crawl job (thread-safe queue)
         self.queue.put(ManagerJob(
             url=url,
             type_="crawl",
-            handler=crawl_result_handler,
             kwargs={
                 "url": url,
-                "handler": scrape_response_handler,
+                "scrape_response_handler": scrape_response_handler,
                 "depth": depth,
+                "crawl_result_handler": crawl_result_handler,
                 "new_window": new_window,
                 "scrape_bytes": scrape_bytes,
                 "navigation_timeout": navigation_timeout,
@@ -124,14 +140,15 @@ class NodriverPlusManager:
                 "max_pages": max_pages,
                 "collect_responses": collect_responses,
                 "delay_range": delay_range,
-                "tab_close_timeout": tab_close_timeout,
+                "request_paused_handler": request_paused_handler,
             }
         ))
-        
-    async def enqueue_scrape(self,
+
+    async def enqueue_scrape(self, 
         url: str,
         scrape_bytes = True,
-        scrape_response_handler: ScrapeResponseHandler = None,
+        existing_tab: nodriver.Tab | None = None,
+        scrape_response_handler: ScrapeResponseHandler | None = None,
         *,
         navigation_timeout = 30,
         wait_for_page_load = True,
@@ -140,27 +157,43 @@ class NodriverPlusManager:
         # solve_cloudflare = True, # not implemented yet
         new_tab = False,
         new_window = False,
+        request_paused_handler = ScrapeRequestPausedHandler,
     ):
         """async wrapper that still just enqueues a single-page scrape.
 
         kept async so user code calling from coroutines reads naturally even though
         the body only uses the thread-safe queue.
 
-        :param scrape_response_handler: optional handler for when the enqueued scrape finishes.
+        :param url: target url.
+        :param scrape_bytes: capture non-text body bytes.
+        :param existing_tab: reuse provided tab/browser root or create fresh.
+        :param scrape_response_handler: if specified, `scrape_response_handler.handle()` will be called 
+        and awaited before returning the final `ScrapeResponse`
+        :param navigation_timeout: seconds for initial navigation.
+        :param wait_for_page_load: await full load event.
+        :param page_load_timeout: seconds for load phase.
+        :param extra_wait_ms: post-load wait for dynamic content.
+        :param new_tab: request new tab.
+        :param new_window: request isolated window/context.
+        :param request_paused_handler: custom fetch interception handler.
+        **must be a type**—not an instance—so that it can be initiated later with the correct values attached
+        :type request_paused_handler: type[ScrapeRequestPausedHandler]
         """
         self.queue.put(ManagerJob(
             url=url,
             type_="scrape",
-            handler=scrape_response_handler,
             kwargs={
                 "url": url,
                 "scrape_bytes": scrape_bytes,
+                "existing_tab": existing_tab,
+                "scrape_response_handler": scrape_response_handler,
                 "navigation_timeout": navigation_timeout,
                 "wait_for_page_load": wait_for_page_load,
                 "page_load_timeout": page_load_timeout,
                 "extra_wait_ms": extra_wait_ms,
                 "new_tab": new_tab,
                 "new_window": new_window,
+                "request_paused_handler": request_paused_handler,
             }
         ))
 
@@ -263,7 +296,7 @@ class NodriverPlusManager:
             try:
                 result = self._stop_handler(exported)
                 if asyncio.iscoroutine(result):
-                    await result  # type: ignore[arg-type]
+                    await result
             except Exception:
                 logger.exception("stop handler failed")
             finally:
@@ -284,17 +317,9 @@ class NodriverPlusManager:
             msg = f"{job.type_} job <{job.url}>"
             try:
                 if job.type_ == "crawl":
-                    result = await self.ndp.crawl(**job.kwargs)
+                    await self.ndp.crawl(**job.kwargs)
                 elif job.type_ == "scrape":
-                    result = await self.ndp.scrape(**job.kwargs)
-                try:
-                    if job.handler is not None:
-                        if asyncio.iscoroutinefunction(job.handler.handle):
-                            await job.handler.handle(result)
-                        else:
-                            job.handler.handle(result)
-                except Exception:
-                    logger.exception("error running handler for %s", msg)
+                    await self.ndp.scrape(**job.kwargs)
             except asyncio.CancelledError:
                 raise
             except Exception:
