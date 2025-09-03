@@ -41,15 +41,6 @@
 
     const navProto = Object.getPrototypeOf(navigator);
 
-    // screen orientation
-    if (!screen.orientation) {
-        defineNativeGetter(screen, "orientation", {
-            type: "landscape-primary",
-            angle: 0,
-            onchange: null
-        });
-    }
-
     // PDF plugin support
     const pdfPlugins = [
         {

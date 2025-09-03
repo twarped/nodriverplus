@@ -32,6 +32,9 @@ TARGET_DOMAINS_RAW: dict[str, list[str] | str] = {
         "DOMDebugger", "DOMSnapshot", "LayerTree",
         "Debugger",
     ],
+    "dedicated_worker": [
+        "Runtime", "Debugger", "Log", "Profiler",
+    ],
     "worker": [
         "Runtime", "Debugger", "Log", "Profiler",
     ],

@@ -87,5 +87,7 @@
     defineNativeGetter(navProto, "userAgent", uaPatch.userAgent);
     defineNativeGetter(navProto, "appVersion", uaPatch.appVersion);
     defineNativeGetter(navProto, "platform", uaPatch.platform);
+
     defineNativeGetter(navProto, "language", uaPatch.acceptLanguage);
+    defineNativeGetter(navProto, "languages", [uaPatch.acceptLanguage]);
 })();

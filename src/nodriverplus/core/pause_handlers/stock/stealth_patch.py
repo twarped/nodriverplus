@@ -36,28 +36,18 @@ async def patch_stealth(
 
     # try adding the patch to the page
     if can_use_domain(target_type, "Page"):
-        await connection.send(cdp.page.enable(), session_id=session_id)
         await connection.send(cdp.page.add_script_to_evaluate_on_new_document(
             source=js,
             include_command_line_api=True,
             run_immediately=True
         ), session_id)
-        logger.debug("successfully added script to %s", msg)
-
-    try:
+    if can_use_domain(target_type, "Runtime"):
         await connection.send(cdp.runtime.evaluate(
             expression=js,
             include_command_line_api=True,
             await_promise=True,
             allow_unsafe_eval_blocked_by_csp=True
         ), session_id=session_id)
-    except Exception as e:
-        if "-3200" in str(e):
-            logger.warning("too slow patching %s", msg)
-        else:
-            logger.exception("failed to patch %s:", msg)
-    else:
-        logger.debug("successfully applied patch to %s", msg)
 
 class StealthPatch(TargetInterceptor):
     """stock `TargetInterceptor` for applying stealth patches to targets.

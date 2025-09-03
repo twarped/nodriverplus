@@ -20,13 +20,13 @@ class UserAgent:
     def __init__(self, 
         user_agent: str,
         platform: str,
-        language: str,
+        accept_language: str,
         metadata: cdp.emulation.UserAgentMetadata | None = None,
         app_version: str = None
     ):
         self.user_agent = user_agent
         self.platform = platform
-        self.language = language
+        self.accept_language = accept_language
         self.metadata = metadata
         self.app_version = app_version or user_agent.removeprefix("Mozilla/")
 
@@ -44,7 +44,7 @@ class UserAgent:
         return cls(
             user_agent=user_agent,
             platform=data.get("platform", ""),
-            language=data.get("language", ""),
+            accept_language=data.get("acceptLanguage", ""),
             metadata=metadata,
             app_version=data.get("appVersion") or user_agent.removeprefix("Mozilla/"),
         )
@@ -70,7 +70,7 @@ class UserAgent:
         obj = {
             "userAgent": self.user_agent,
             "platform": self.platform,
-            "acceptLanguage": self.language,
+            "acceptLanguage": self.accept_language,
         }
         if self.metadata:
             # cdp metadata already exposes the proper camelCase structure

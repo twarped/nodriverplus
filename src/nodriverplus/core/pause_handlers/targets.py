@@ -2,7 +2,7 @@ import logging
 from typing import Callable, Coroutine
 from nodriver import cdp, Tab, Connection, Browser
 import nodriver
-from ..cdp_helpers import TARGET_DOMAINS
+from ..cdp_helpers import can_use_domain
 
 logger = logging.getLogger(__name__)
 
@@ -57,36 +57,32 @@ class TargetInterceptorManager:
         :param ev: optional original attach event (when recursively called).
         """
         connection = self.connection
-        types = list(TARGET_DOMAINS.keys())
-        types.remove("tab")
-
-        # hangs on service workers if not deduped
-        if getattr(connection, "_already_attached", False):
-            return
-        setattr(connection, "_already_attached", True)
+        filters = [{"type": "tab", "exclude": True}]
 
         if ev:
             msg = f"{ev.target_info.type_} <{ev.target_info.url}>"
             session_id = ev.session_id
+            # service workers will show up twice if allowed to populate on Page events
+            if ev.target_info.type_ == "page":
+                filters.append({"type": "service_worker", "exclude": True})
         else:
             msg = connection
             session_id = None
+        filters.append({})
         try:
             await connection.send(cdp.target.set_auto_attach(
                 auto_attach=True,
                 wait_for_debugger_on_start=True,
                 flatten=True,
-                filter_=cdp.target.TargetFilter(
-                    [{"type": t, "exclude": False} for t in types]
-                )
+                filter_=cdp.target.TargetFilter(filters)
             ), session_id)
-            logger.debug("successfully set auto attach for %s", msg)
+            logger.info("successfully set auto attach for %s", msg)
         except Exception:
             logger.exception("failed to set auto attach for %s:", msg)
 
 
 
-    async def apply(
+    async def apply_interceptors(
         self,
         ev: cdp.target.AttachedToTarget | None,
     ):
@@ -95,10 +91,26 @@ class TargetInterceptorManager:
 
         :param ev: the event to pass to the interceptors.
         """
+        if ev:
+            msg = f"{ev.target_info.type_} <{ev.target_info.url}>"
+        elif isinstance(self.connection, Tab):
+            msg = f"tab <{self.connection.url}>"
+        else:
+            msg = f"connection <{self.connection}>"
         for interceptor in self.interceptors:
-            await interceptor.handle(self.connection, ev)
-            
-            
+            if ev:
+                msg = f"{interceptor} to {msg}"
+            else:
+                msg = f"{interceptor} to {self.connection}"
+            try:
+                await interceptor.handle(self.connection, ev)
+            except Exception as e:
+                if "-32000" in str(e):
+                    logger.warning("failed to apply interceptor %s: execution context not created yet", msg)
+                else: 
+                    raise
+
+
     async def on_attach(
         self,
         ev: cdp.target.AttachedToTarget | None,
@@ -117,16 +129,17 @@ class TargetInterceptorManager:
         else:
             msg = connection
             session_id = None
-        logger.debug("successfully attached to %s", msg)
+        logger.info("successfully attached to %s", msg)
+
         # apply interceptors
-        await self.apply(ev)
+        await self.apply_interceptors(ev)
         # recursive attachment
         await self.set_hook(ev)
         # continue like normal
         try:
             await connection.send(cdp.runtime.run_if_waiting_for_debugger(), session_id)
         except Exception as e:
-            if "-3200" in str(e):
+            if "-32001" in str(e):
                 logger.warning("too slow resuming %s", msg)
             else:
                 logger.exception("failed to resume %s:", msg)

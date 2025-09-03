@@ -66,12 +66,12 @@ async def get_user_agent(tab: nodriver.Tab):
     ua_data: dict = json.loads(await tab.evaluate(js, await_promise=True))
     user_agent = UserAgent.from_json(ua_data)
     logger.info("successfully retrieved user agent from %s", tab.url)
-    logger.debug(
-        "user agent data retrieved from %s:\nua=%s\nplatform=%s\nlang=%s\nmetadata=%s",
+    logger.info(
+        "user agent data retrieved from %s:\nua=%s\nplatform=%s\nacceptLanguage=%s\nmetadata=%s",
         tab.url,
         user_agent.user_agent,
         user_agent.platform,
-        user_agent.language,
+        user_agent.accept_language,
         bool(user_agent.metadata),
     )
     return user_agent

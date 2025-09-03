@@ -325,12 +325,26 @@ class RequestPausedHandler:
 
         :param ev: interception event referencing the paused network request.
         """
+        # chrome expects postData param to be base64 per Fetch.continueRequest spec
+        post_data = ev.request.post_data
+        if post_data is not None:
+            try:
+                # try to detect if already valid base64; if not, encode
+                base64.b64decode(post_data, validate=True)
+            except Exception:
+                if isinstance(post_data, str):
+                    post_data = base64.b64encode(post_data.encode()).decode()
+                elif isinstance(post_data, (bytes, bytearray)):
+                    post_data = base64.b64encode(bytes(post_data)).decode()
+                else:
+                    # unknown type - skip encoding and let chrome handle (will likely fail)
+                    logger.debug("unexpected post_data type for %s: %r", ev.request.url, type(post_data))
         await self.tab.send(
             cdp.fetch.continue_request(
                 ev.request_id,
                 ev.request.url,
                 ev.request.method,
-                ev.request.post_data,
+                post_data,
                 [cdp.fetch.HeaderEntry(name=key, value=value) for key, value in ev.request.headers.items()],
                 True
             )

@@ -45,7 +45,7 @@ async def patch_user_agent(
     if can_use_domain(target_type, "Network"):
         await connection.send(cdp.network.set_user_agent_override(
             user_agent=user_agent.user_agent,
-            accept_language=user_agent.language,
+            accept_language=user_agent.accept_language,
             platform=user_agent.platform,
             user_agent_metadata=user_agent.metadata,
         ), session_id)
@@ -53,16 +53,24 @@ async def patch_user_agent(
     if can_use_domain(target_type, "Emulation"):
         await connection.send(cdp.emulation.set_user_agent_override(
             user_agent=user_agent.user_agent,
-            accept_language=user_agent.language,
+            accept_language=user_agent.accept_language,
             platform=user_agent.platform,
             user_agent_metadata=user_agent.metadata,
         ), session_id)
         domains_patched.append("Emulation")
+        
+    js = load_js("patch_user_agent.js")
+    uaPatch = f"const uaPatch = {user_agent.to_json(True, True)};"
+    script = js.replace("//uaPatch//", uaPatch)
+    if can_use_domain(target_type, "Page"):
+        await connection.send(cdp.page.add_script_to_evaluate_on_new_document(
+            source=script,
+            include_command_line_api=True,
+            run_immediately=True
+        ), session_id)
     if can_use_domain(target_type, "Runtime"):
-        js = load_js("patch_user_agent.js")
-        uaPatch = f"const uaPatch = {user_agent.to_json(True, True)};"
         await connection.send(cdp.runtime.evaluate(
-            expression=js.replace("//uaPatch//", uaPatch),
+            expression=script,
             include_command_line_api=True,
             allow_unsafe_eval_blocked_by_csp=True
         ), session_id)

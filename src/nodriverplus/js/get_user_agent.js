@@ -24,7 +24,7 @@
     return JSON.stringify({ 
         userAgent: ua, 
         platform: navigator.platform,
-        language: navigator.language,
+        acceptLanguage: navigator.language,
         metadata: metadata, 
     });
 })()
