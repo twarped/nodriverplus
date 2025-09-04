@@ -6,9 +6,9 @@ from typing import Callable
 
 import nodriver
 
-from .nodriverplus import NodriverPlus
 from .pause_handlers import ScrapeRequestPausedHandler
 from .scrape_response import ScrapeResponseHandler, CrawlResultHandler
+from .tab import crawl, scrape
 
 logger = logging.getLogger(__name__)
 
@@ -19,34 +19,21 @@ class ManagerJob:
     kwargs: dict
 
     def __init__(self, url: str, type_: str, kwargs: dict):
-        """lightweight container describing a pending unit of work.
-
-        jobs sit on a thread-safe queue so producer code (maybe running in a different
-        thread) can schedule crawls / scrapes without touching the event loop directly.
-
-        :param url: target url for the operation.
-        :param type_: either "crawl" or "scrape" (dispatcher uses this).
-        :param kwargs: params forwarded to NodriverPlus.crawl/scrape.
-        """
+        # lightweight container describing a pending unit of work.
         self.url = url
         self.type_ = type_
         self.kwargs = kwargs
 
     def from_dict(cls, kwargs: dict):
-        """alternate constructor kept for symmetry with export/import paths.
-
-        note: signature mirrors the shape returned by ManagerJob.__dict__ so persisted
-        queue snapshots can be rehydrated.
-        """
         return cls(
             url=kwargs["url"],
             type_=kwargs["type_"],
             kwargs=kwargs["kwargs"]
         )
 
-class NodriverPlusManager:
+
+class Manager:
     queue: _thread_queue.Queue
-    ndp: NodriverPlus
     concurrency: int
     _running: bool
     _running_tasks: list[asyncio.Task]
@@ -57,19 +44,9 @@ class NodriverPlusManager:
     _bound_task: asyncio.Task | None
     _stop_handler: Callable[[list[ManagerJob]], any] | None
 
-    def __init__(self, ndp: NodriverPlus, concurrency: int = 1):
-        """orchestrates queued scrape/crawl jobs with bounded concurrency.
-
-        a single background coroutine drains a thread-safe queue (put from any thread)
-        and spins up asyncio tasks (limited by a semaphore) that call into the shared
-        NodriverPlus instance.
-
-        :param ndp: active NodriverPlus instance (already started).
-        :param concurrency: max number of simultaneous jobs.
-        """
-        # use a thread-safe queue for cross-thread communication
+    def __init__(self, concurrency: int = 1):
+        # now stateless w.r.t browser context; per-job base passed in enqueue.
         self.queue = _thread_queue.Queue()
-        self.ndp = ndp
         self.concurrency = concurrency
         self._thread = None
         self._stop_event = threading.Event()
@@ -79,6 +56,7 @@ class NodriverPlusManager:
         self._stop_handler = None
 
     async def enqueue_crawl(self,
+        base: nodriver.Browser | nodriver.Tab,
         url: str,
         scrape_response_handler: ScrapeResponseHandler = None,
         depth = 1,
@@ -95,37 +73,16 @@ class NodriverPlusManager:
         collect_responses: bool = False,
         delay_range: tuple[float, float] | None = None,
         request_paused_handler: ScrapeRequestPausedHandler = None,
+        proxy_server: str = None,
+        proxy_bypass_list: list[str] = None,
+        origins_with_universal_network_access: list[str] = None,
     ):
-        """async wrapper that just enqueues a crawl up to `depth`.
-
-        kept async so user code calling from coroutines reads naturally even though
-        the body only uses the thread-safe queue.
-
-        :param url: root starting point.
-        :param scrape_response_handler: optional `ScrapeResponseHandler` to be passed to `scrape()`
-        :param depth: max link depth (0 means single page).
-        :param crawl_result_handler: if specified, `crawl_result_handler.handle()` 
-        will be called and awaited before returning the final `CrawlResult`.
-        :param new_window: isolate crawl in new context+window when True.
-        :param scrape_bytes: capture bytes stream when possible.
-        :param navigation_timeout: seconds for initial navigation phase.
-        :param wait_for_page_load: await full load event.
-        :param page_load_timeout: seconds for load phase.
-        :param extra_wait_ms: post-load settle time.
-        :param concurrency: worker concurrency.
-        :param max_pages: hard cap on processed pages.
-        :param collect_responses: store every ScrapeResponse object.
-        :param delay_range: (min,max) jitter before first scrape per worker loop.
-        :param tab_close_timeout: seconds to wait closing a tab.
-        :param request_paused_handler: custom fetch interception handler.
-        **must be a type**—not an instance—so that it can be initiated later with the correct values attached
-        :type request_paused_handler: type[ScrapeRequestPausedHandler]
-        """
         # enqueue a crawl job (thread-safe queue)
         self.queue.put(ManagerJob(
             url=url,
             type_="crawl",
             kwargs={
+                "base": base,
                 "url": url,
                 "scrape_response_handler": scrape_response_handler,
                 "depth": depth,
@@ -141,51 +98,37 @@ class NodriverPlusManager:
                 "collect_responses": collect_responses,
                 "delay_range": delay_range,
                 "request_paused_handler": request_paused_handler,
+                "proxy_server": proxy_server,
+                "proxy_bypass_list": proxy_bypass_list,
+                "origins_with_universal_network_access": origins_with_universal_network_access,
             }
         ))
 
     async def enqueue_scrape(self, 
+        base: nodriver.Browser | nodriver.Tab,
         url: str,
         scrape_bytes = True,
-        existing_tab: nodriver.Tab | None = None,
         scrape_response_handler: ScrapeResponseHandler | None = None,
         *,
         navigation_timeout = 30,
         wait_for_page_load = True,
         page_load_timeout = 60,
         extra_wait_ms = 0,
-        # solve_cloudflare = True, # not implemented yet
         new_tab = False,
         new_window = False,
         request_paused_handler = ScrapeRequestPausedHandler,
+        proxy_server: str = None,
+        proxy_bypass_list: list[str] = None,
+        origins_with_universal_network_access: list[str] = None,
     ):
-        """async wrapper that still just enqueues a single-page scrape.
-
-        kept async so user code calling from coroutines reads naturally even though
-        the body only uses the thread-safe queue.
-
-        :param url: target url.
-        :param scrape_bytes: capture non-text body bytes.
-        :param existing_tab: reuse provided tab/browser root or create fresh.
-        :param scrape_response_handler: if specified, `scrape_response_handler.handle()` will be called 
-        and awaited before returning the final `ScrapeResponse`
-        :param navigation_timeout: seconds for initial navigation.
-        :param wait_for_page_load: await full load event.
-        :param page_load_timeout: seconds for load phase.
-        :param extra_wait_ms: post-load wait for dynamic content.
-        :param new_tab: request new tab.
-        :param new_window: request isolated window/context.
-        :param request_paused_handler: custom fetch interception handler.
-        **must be a type**—not an instance—so that it can be initiated later with the correct values attached
-        :type request_paused_handler: type[ScrapeRequestPausedHandler]
-        """
+        # enqueue a scrape job (thread-safe queue)
         self.queue.put(ManagerJob(
             url=url,
             type_="scrape",
             kwargs={
+                "base": base,
                 "url": url,
                 "scrape_bytes": scrape_bytes,
-                "existing_tab": existing_tab,
                 "scrape_response_handler": scrape_response_handler,
                 "navigation_timeout": navigation_timeout,
                 "wait_for_page_load": wait_for_page_load,
@@ -194,6 +137,9 @@ class NodriverPlusManager:
                 "new_tab": new_tab,
                 "new_window": new_window,
                 "request_paused_handler": request_paused_handler,
+                "proxy_server": proxy_server,
+                "proxy_bypass_list": proxy_bypass_list,
+                "origins_with_universal_network_access": origins_with_universal_network_access,
             }
         ))
 
@@ -249,7 +195,7 @@ class NodriverPlusManager:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            raise RuntimeError("NodriverPlusManager.start() must be called from within an asyncio event loop")
+            raise RuntimeError("Manager.start() must be called from within an asyncio event loop")
 
         self._runner_task = loop.create_task(self._run_loop())
 
@@ -316,10 +262,14 @@ class NodriverPlusManager:
         async def _handle_job(job: ManagerJob):
             msg = f"{job.type_} job <{job.url}>"
             try:
+                # each job carries its own base (browser/tab)
+                base = job.kwargs.pop("base", None)
+                if base is None:
+                    raise RuntimeError("manager job missing 'base'")
                 if job.type_ == "crawl":
-                    await self.ndp.crawl(**job.kwargs)
+                    await crawl(base, **job.kwargs)
                 elif job.type_ == "scrape":
-                    await self.ndp.scrape(**job.kwargs)
+                    await scrape(base, **job.kwargs)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -370,4 +320,9 @@ class NodriverPlusManager:
             await asyncio.wait_for(asyncio.to_thread(self.queue.join), timeout)
         else:
             await asyncio.to_thread(self.queue.join)
+
+
+# backward compatible alias (deprecated)
+class Manager(Manager):  # pragma: no cover - simple alias
+    pass
     

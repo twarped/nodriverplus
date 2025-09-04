@@ -9,12 +9,12 @@ logger = logging.getLogger(__name__)
 class TargetInterceptor:
     """base class for a target interceptor
 
-    you must provide a `handle()` method that takes a connection and an event.
+    you must provide a `on_attach()` method that takes a connection and an event.
 
     called by `apply_target_interceptors()`
     """
 
-    async def handle(
+    async def on_attach(
         self,
         connection: Tab | Connection,
         ev: cdp.target.AttachedToTarget | None
@@ -26,11 +26,27 @@ class TargetInterceptor:
         :type ev: AttachedToTarget | None
         """
         pass
-    
+
+    async def on_change(
+        self,
+        connection: Tab | Connection,
+        ev: cdp.target.TargetInfoChanged | None,
+        session_id: str,
+    ):
+        """hook for handling target change events
+
+        :param connection: the connection to the target.
+        :param ev: the target info changed event
+        :type ev: TargetInfoChanged | None
+        """
+        pass
+
 
 class TargetInterceptorManager:
     connection: Tab | Connection
     interceptors: list[TargetInterceptor]
+    # [target_id: session_id]
+    session_ids: dict[str, str]
 
     def __init__(self, 
         session: Tab | Connection | Browser = None, 
@@ -44,6 +60,7 @@ class TargetInterceptorManager:
         """
         self.connection = session.connection if isinstance(session, Browser) else session
         self.interceptors = interceptors
+        self.session_ids = {}
 
 
     async def set_hook(
@@ -62,6 +79,7 @@ class TargetInterceptorManager:
         if ev:
             msg = f"{ev.target_info.type_} <{ev.target_info.url}>"
             session_id = ev.session_id
+            self.session_ids[ev.target_info.target_id] = session_id
             # service workers will show up twice if allowed to populate on Page events
             if ev.target_info.type_ == "page":
                 filters.append({"type": "service_worker", "exclude": True})
@@ -81,12 +99,36 @@ class TargetInterceptorManager:
             logger.exception("failed to set auto attach for %s:", msg)
 
 
+    async def interceptors_on_change(
+        self,
+        ev: cdp.target.TargetInfoChanged,
+    ):
+        """execute a list of `TargetInterceptor.on_change` calls—(in order)—to
+        `self.connection` with the `TargetInfoChanged` event.
 
-    async def apply_interceptors(
+        :param ev: the event to pass to the interceptors.
+        """
+        target_msg = f"{ev.target_info.type_} <{ev.target_info.url}>"
+        for interceptor in self.interceptors:
+            msg = f"{interceptor} to {target_msg}"
+            try:
+                await interceptor.on_change(self.connection, ev, self.session_ids.get(ev.target_info.target_id))
+            except Exception as e:
+                if "-32000" in str(e):
+                    logger.warning("failed to apply interceptor (on_change) %s: execution context not created yet", msg)
+                elif "-32001" in str(e):
+                    logger.warning("failed to apply interceptor (on_change) %s: session not found. (potential timing issue?)", msg)
+                elif "-32601" in str(e):
+                    logger.warning("failed to apply interceptor (on_change) %s: method not found", msg)
+                else: 
+                    logger.exception("failed to apply interceptor (on_change) %s:", msg)
+
+
+    async def interceptors_on_attach(
         self,
         ev: cdp.target.AttachedToTarget | None,
     ):
-        """apply a list of target interceptors—(in order)—to 
+        """execute a list of `TargetInterceptor.on_attach` calls—(in order)—to
         `self.connection` with the `AttachedToTarget` event if available.
 
         :param ev: the event to pass to the interceptors.
@@ -103,12 +145,12 @@ class TargetInterceptorManager:
             else:
                 msg = f"{interceptor} to {self.connection}"
             try:
-                await interceptor.handle(self.connection, ev)
+                await interceptor.on_attach(self.connection, ev)
             except Exception as e:
                 if "-32000" in str(e):
-                    logger.warning("failed to apply interceptor %s: execution context not created yet", msg)
+                    logger.warning("failed to apply interceptor (on_attach) %s: execution context not created yet", msg)
                 else: 
-                    logger.exception("failed to apply interceptor %s:", msg)
+                    logger.exception("failed to apply interceptor (on_attach) %s:", msg)
 
 
     async def on_attach(
@@ -132,15 +174,15 @@ class TargetInterceptorManager:
         logger.debug("successfully attached to %s", msg)
 
         # apply interceptors
-        await self.apply_interceptors(ev)
-        # recursive attachment
+        await self.interceptors_on_attach(ev)
+        # recursive attachment and TargetInfoChanged handling
         await self.set_hook(ev)
         # continue like normal
         try:
             await connection.send(cdp.runtime.run_if_waiting_for_debugger(), session_id)
         except Exception as e:
             if "-32001" in str(e):
-                logger.warning("too slow resuming %s", msg)
+                logger.warning("session for %s not found. (potential timing issue?)", msg)
             else:
                 logger.exception("failed to resume %s:", msg)
         else:
@@ -161,4 +203,6 @@ class TargetInterceptorManager:
         setattr(connection, "_target_interceptor_manager_initialized", True)
 
         connection.add_handler(cdp.target.AttachedToTarget, self.on_attach)
+        # subscribe to target changes as well
+        connection.add_handler(cdp.target.TargetInfoChanged, self.interceptors_on_change)
         await self.set_hook(None)

@@ -318,6 +318,18 @@ class RequestPausedHandler:
         logger.debug("successfully fulfilled request for %s", ev.request.url)
 
 
+    async def should_intercept_response(self, ev: cdp.fetch.RequestPaused) -> bool:
+        """predicate controlling whether to intercept the response phase.
+
+        return True to enable response phase interception (response_* fields populated);
+        default False lets the response flow through unmodified.
+
+        :param ev: interception event (mutable) used for decision logic.
+        :return: bool flag to trigger response phase interception.
+        """
+        return False
+
+
     async def continue_request(self, ev: cdp.fetch.RequestPaused):
         """allow the original request to proceed untouched (or lightly adjusted).
 
@@ -346,13 +358,16 @@ class RequestPausedHandler:
                 ev.request.method,
                 post_data,
                 [cdp.fetch.HeaderEntry(name=key, value=value) for key, value in ev.request.headers.items()],
-                True
+                await self.should_intercept_response(ev)
             )
         )
+        logger.debug("successfully continued request for %s", ev.request.url)
 
 
     async def should_take_response_body_as_stream(self, ev: cdp.fetch.RequestPaused) -> bool:
         """predicate for streaming response bodies before chrome consumes them.
+
+        **NOTE**: this is only invoked when `should_intercept_response()` returns True.
 
         use when you need raw bytes (pdf, media) or want to transform before fulfill.
 
@@ -426,6 +441,8 @@ class RequestPausedHandler:
     async def on_response(self, ev: cdp.fetch.RequestPaused):
         """hook invoked after a response is available (response phase interception).
 
+        **NOTE**: only invoked when `should_intercept_response()` returns True.
+        
         extend to inspect headers / status / decide transformation before continue_response.
 
         :param ev: interception event (contains response_* fields; may be mutated).
@@ -443,6 +460,9 @@ class RequestPausedHandler:
 
         :param ev: interception event carrying response metadata.
         """
+        # we intentionally do NOT inject cross-origin * policy headers here.
+        # modifying subresource headers does not bypass a top-level COEP requirement and risks
+        # masking real site policies. we forward original headers untouched.
         await self.tab.send(
             cdp.fetch.continue_response(
                 ev.request_id,
@@ -485,12 +505,16 @@ class RequestPausedHandler:
             meta = getattr(ev, "meta", None)
             if redirect:
                 # just pass through redirects (no streaming / fulfill)
-                await self.continue_response(ev)
                 logger.debug("detected redirect: %s => %s", 
                     self.nav_contexts[ev.request_id].chain[-1], 
                     ev.request.url
                 )
-            elif isinstance(meta, RequestMeta) and meta.final_main and await self.should_take_response_body_as_stream(ev):
+                await self.continue_response(ev)
+            elif (
+                isinstance(meta, RequestMeta) 
+                and meta.final_main 
+                and await self.should_take_response_body_as_stream(ev)
+            ):
                 await self.take_response_body_as_stream(ev)
                 await self.fulfill_request(ev)
             else:
@@ -518,6 +542,7 @@ class RequestPausedHandler:
         """await all outstanding interception tasks."""
         logger.info("waiting for pending tasks to finish")
         await asyncio.gather(*self.tasks, return_exceptions=True)
+        logger.info("all pending tasks finished")
 
 
     async def start(self):

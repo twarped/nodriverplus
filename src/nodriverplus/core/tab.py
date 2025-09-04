@@ -97,7 +97,7 @@ async def crawl(
     if `crawl_result_handler` is specified, `crawl_result_handler.handle()` will 
     be called and awaited before returning the final `CrawlResult`.
 
-    `crawl_result_handler` is nifty if you're crawling with a `NodriverPlusManager`
+    `crawl_result_handler` is nifty if you're crawling with a `Manager`
     instance.
 
     - **`proxy_server`** — (EXPERIMENTAL) (Optional) Proxy server, similar to the one passed to --proxy-server
@@ -445,7 +445,7 @@ async def scrape(
     request_paused_handler = (request_paused_handler or ScrapeRequestPausedHandler)(
         tab, scrape_response, url, scrape_bytes
     )
-    await request_paused_handler.start()
+    # await request_paused_handler.start()
 
     try:
         nav_response = await get_with_timeout(

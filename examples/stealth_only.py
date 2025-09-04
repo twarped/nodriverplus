@@ -3,7 +3,7 @@ from nodriverplus import NodriverPlus
 
 # basic stealth startup + shutdown
 async def main():
-    ndp = NodriverPlus()  # stealth defaults to True
+    ndp = NodriverPlus()  # hide_headless defaults to True
     # start browser (headless False by default for now) - adjust as needed
     await ndp.start()
     # do nothing - just demonstrate bring-up

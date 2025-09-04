@@ -1,8 +1,7 @@
-"""stealth + crawl helpers layered over `nodriver`.
+"""scrape/crawl helpers layered over `nodriver`.
 
 wraps nodriver to add:
 - user agent acquisition + patch (network / emulation / runtime) with headless token scrub
-- stealth scripts (navigator / plugins / workers) auto-applied via Target.setAutoAttach
 - single page scrape (html + optional raw bytes + link extraction)
 - crawl (depth, concurrency, jitter, per-page handler, error + timeout tracking)
 - fetch interception to stream non-text main bodies (e.g. pdf) before chrome consumes them
@@ -19,11 +18,10 @@ from .user_agent import *
 from .scrape_response import *
 from .tab import get, get_user_agent, scrape, crawl, get_with_timeout
 from .browser import get, stop
+from .manager import Manager
 from .pause_handlers import TargetInterceptor, TargetInterceptorManager
 from .pause_handlers.stock import (
     UserAgentPatch, 
-    StealthPatch, 
-    patch_stealth,
     patch_user_agent,
     ScrapeRequestPausedHandler,
     WindowSizePatch,
@@ -37,45 +35,43 @@ class NodriverPlus:
     """high-level orchestrator for starting a stealthy browser and performing scrapes/crawls.
 
     lifecycle:
-    1. `start()`: launch chrome, fetch + patch user agent, install stealth auto-attach
+    1. `start()`: launch chrome and fetch + patch user agent
     2. `scrape()`: navigate + capture html / links / headers / optional bytes
     3. `crawl()`: customizable nodriver crawling API with depth + concurrency + handler-produced link expansion
     4. `stop()`: shutdown underlying process (optional graceful wait)
 
-    bytes capture: uses Fetch domain interception + fulfill flow to stream non-text main bodies.
     ua patching: applies Network + Emulation overrides + runtime JS patch to sync navigator.* / userAgentData.
-    stealth: early evaluate scripts for pages + workers (plugins, languages, canvas, webdriver flag, etc.).
     """
     browser: nodriver.Browser
     config: nodriver.Config
     user_agent: UserAgent
-    stealth: bool
     interceptor_manager: TargetInterceptorManager
 
     def __init__(self, 
         user_agent: UserAgent = None, 
-        stealth: bool = True, 
-        interceptors: list[TargetInterceptor] = None
+        hide_headless: bool = True, 
+        interceptors: list[TargetInterceptor] = None,
+        manager_concurrency: int = 1,
     ):
         """initialize a `NodriverPlus` instance
         
         :param user_agent: `UserAgent` to patch browser with 
         using stock interceptor: `UserAgentInterceptor`
-        :param stealth: whether to apply the stock interceptor: `StealthInterceptor`
+
         :param interceptors: list of additional custom interceptors to apply
         """
         self.config = Config()
         self.browser = None
         self.user_agent = user_agent
-        self.stealth = stealth
+        self.hide_headless = hide_headless
         # init interceptor manager and add provided + stock interceptors
         interceptor_manager = TargetInterceptorManager()
         interceptor_manager.interceptors.extend(interceptors or [])
         if user_agent:
-            interceptor_manager.interceptors.append(UserAgentPatch(user_agent, stealth))
-        if stealth:
-            interceptor_manager.interceptors.append(StealthPatch())
+            interceptor_manager.interceptors.append(UserAgentPatch(user_agent, hide_headless))
         self.interceptor_manager = interceptor_manager
+        # dedicated queue manager (jobs provide their own per-job crawl/scrape concurrency)
+        self.manager = Manager(concurrency=manager_concurrency)
 
 
     # TODO: make a `WindowSize` dataclass that can be passed
@@ -102,8 +98,7 @@ class NodriverPlus:
         - applies the correct `browser_args`
         - and applies the stock `WindowSizePatch` interceptor to the browser
 
-        wraps nodriver.start then optionally fetches + patches the user agent and installs
-        stealth scripts. returns the raw
+        wraps nodriver.start then optionally fetches + patches the user agent. returns the raw
         nodriver Browser so callers can still use low-level APIs.
 
         :param config: optional pre-built Config.
@@ -157,17 +152,14 @@ class NodriverPlus:
         # just in case they added self.user_agent outside of `__init__()`
         if not any(isinstance(i, UserAgentPatch) for i in self.interceptor_manager.interceptors):
             self.interceptor_manager.interceptors.append(
-                UserAgentPatch(self.user_agent, self.stealth)
+                UserAgentPatch(self.user_agent, self.hide_headless)
             )
-
-        # apply patches to main tab
-        await patch_stealth(self.browser.main_tab, None)
 
         await patch_user_agent(
             self.browser.main_tab, 
             None,
             self.user_agent,
-            self.stealth
+            self.hide_headless
         )
 
         if window_size:
@@ -214,7 +206,7 @@ class NodriverPlus:
         if `crawl_result_handler` is specified, `crawl_result_handler.handle()` will 
         be called and awaited before returning the final `CrawlResult`.
 
-        `crawl_result_handler` is nifty if you're crawling with a `NodriverPlusManager`
+        `crawl_result_handler` is nifty if you're crawling with a `Manager`
         instance.
 
         :param url: root starting point.
@@ -416,8 +408,53 @@ class NodriverPlus:
 
 
     async def stop(self, graceful = True):
-        """stop browser process (optionally wait for graceful exit).
+        """stop browser and underlying `Manager` process (optionally wait for graceful exit).
 
         :param graceful: wait for underlying process to exit.
         """
+        await self.manager.stop()
         await stop(self.browser, graceful)
+
+
+    async def enqueue_crawl(self, *args, **kwargs):
+        """enqueue a crawl job using internal `Manager`.
+
+        the browser must be started; auto-starts manager loop on first use.
+        first positional argument must be the root url (mirrors Manager.enqueue_crawl minus base).
+        """
+        if not self.browser:
+            raise RuntimeError("browser not started")
+        # manager expects (base, url, ...)
+        if self.manager._runner_task is None:
+            self.manager.start()
+        return await self.manager.enqueue_crawl(self.browser, *args, **kwargs)
+
+
+    async def enqueue_scrape(self, *args, **kwargs):
+        """enqueue a scrape job using internal `Manager`.
+
+        auto-starts manager loop on first use if not already running.
+        first positional argument must be the target url.
+        """
+        if not self.browser:
+            raise RuntimeError("browser not started")
+        if self.manager._runner_task is None:
+            self.manager.start()
+        return await self.manager.enqueue_scrape(self.browser, *args, **kwargs)
+
+
+    async def wait_for_queue(self, timeout: float | None = None):
+        """await completion of all queued manager jobs."""
+        await self.manager.wait_for_queue(timeout)
+
+
+    async def start_manager(self, concurrency: int | None = None):
+        """start the internal `Manager` loop if not already running."""
+        if self.manager._runner_task is None:
+            self.manager.concurrency = concurrency or self.manager.concurrency
+            self.manager.start()
+
+
+    async def stop_manager(self, timeout: float | None = None):
+        """gracefully stop internal manager and export remaining jobs."""
+        return await self.manager.stop(timeout)

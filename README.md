@@ -19,7 +19,7 @@ this library is mostly just a working proof of concept as of now, and will need 
 - [ ] make timed_out_navigating vs timed_out_loading configurable in `crawl()`
 - [ ] fix stealth patch leaks (native masking)
 - [ ] ensure that links are deduped when crawling
-- [ ] fix `NodriverPlusManager` issue:
+- [ ] fix `Manager` issue:
 	- [ ] doesn't stop on ctrl+c. you have to manually terminate the process
 - [ ] add more granular tests
 - [ ] solve cloudflare checkbox
@@ -35,7 +35,7 @@ this library is mostly just a working proof of concept as of now, and will need 
 - [ ] add target_interceptors: `ScrapeRequestInterceptor` and `ScrapeResponseInterceptor`
 - [ ] turn handwritten target_interceptors into ones using the new api
 - [ ] add option to receive bytes as stream on `ScrapeResponse` instead of a cached var
-- [ ] update `CrawlResultHandler` and `NodriverPlusManager` to handle errors and stuff
+- [ ] update `CrawlResultHandler` and `Manager` to handle errors and stuff
 - [ ] make `pymupdf` optional
 # usage
 
@@ -43,8 +43,8 @@ example if you just want the stealth:
 ```python
 from nodriverplus import NodriverPlus
 
-# stealth defaults to `True`
-ndp = NodriverPlus() # `stealth=True`
+# hide_headless defaults to on
+ndp = NodriverPlus() # `hide_headless=True`
 browser = await ndp.start() # headless or headful
 
 # for a graceful shutdown: (takes longer)
@@ -110,7 +110,7 @@ handy if you want to run crawls and stuff from an http server
 ```python
 from nodriverplus import (
     NodriverPlus,
-    NodriverPlusManager,
+    Manager,
     ScrapeResponseHandler,
     CrawlResultHandler,
 )
@@ -118,7 +118,7 @@ from nodriverplus import (
 ndp = NodriverPlus()
 await ndp.start() # again, headless or headful
 
-manager = NodriverPlusManager(ndp, concurrency=2)
+manager = Manager(ndp, concurrency=2)
 manager.start()
 
 # simple result handlers

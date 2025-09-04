@@ -2,12 +2,9 @@ import asyncio
 import pytest
 
 from nodriverplus import (
-    CrawlResult, 
     CrawlResultHandler,
     NodriverPlus, 
-    NodriverPlusManager, 
     ScrapeResponseHandler, 
-    ScrapeResponse, 
 )
 from nodriverplus.utils import to_markdown, get_type
 
@@ -34,11 +31,10 @@ async def test_crawl_with_bytes_and_stealth_and_manager():
     ndp = NodriverPlus()
     await ndp.start(headless=True)
 
-    manager = NodriverPlusManager(ndp)
-    manager.start()
+    # use NodriverPlus internal manager helpers
 
     class ScrapeHandler(ScrapeResponseHandler):
-        async def html(self, response: ScrapeResponse):
+        async def html(self, response):
             nonlocal has_html, mime_is_pdf
             # check if it generated HTML
             if response.html:
@@ -47,7 +43,7 @@ async def test_crawl_with_bytes_and_stealth_and_manager():
             if response.mime == "application/pdf":
                 mime_is_pdf = True
 
-        async def bytes_(self, response: ScrapeResponse):
+        async def bytes_(self, response):
             nonlocal is_bytes, bytes_conversion_successful
             bytes_type = get_type(response.bytes_)
             print("bytes_type: ", bytes_type.__dict__)
@@ -64,15 +60,13 @@ async def test_crawl_with_bytes_and_stealth_and_manager():
             nonlocal manager_success
             manager_success = True
 
-    await manager.enqueue_crawl(
+    await ndp.enqueue_crawl(
         "https://investors.lockheedmartin.com/static-files/b5548c6b-71f9-4b58-b171-20accb1e8713",
         ScrapeHandler(),
         crawl_result_handler=CrawlHandler(),
         new_window=True
     )
-    await manager.wait_for_queue(60)
-    # stop the nodriver instance
-    await manager.stop()
+    await ndp.wait_for_queue(60)
     await ndp.stop()
 
     assert has_html

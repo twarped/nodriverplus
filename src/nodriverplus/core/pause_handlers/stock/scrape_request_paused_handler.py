@@ -58,6 +58,10 @@ class ScrapeRequestPausedHandler(RequestPausedHandler):
         )
 
 
+    async def should_intercept_response(self, ev):
+        return ev.request.url == self.url
+
+
     async def should_take_response_body_as_stream(self, ev):
         text_types = { "text", "javascript", "json", "xml" }
         headers = {k.lower(): v for k, v in ev.request.headers.items()}

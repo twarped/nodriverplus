@@ -117,7 +117,7 @@ class ScrapeResponseHandler:
     """pluggable hooks invoked during scrape handling inside crawl.
 
     override or pass callables into __init__ to customize behavior (html parsing, bytes processing,
-    timeout handling, link extraction). each method may be sync or async except for `handle`.
+    timeout handling, link extraction). all main methods must be async.
     """
 
     async def timed_out(self, scrape_response: ScrapeResponse) -> list[str] | None:
@@ -136,7 +136,7 @@ class ScrapeResponseHandler:
 
         mutate scrape_response as needed (parse, annotate, store state).
 
-        :param scrape_response: populated response object.
+        :param scrape_response: response object.
         """
         pass
 
@@ -144,9 +144,7 @@ class ScrapeResponseHandler:
     async def bytes_(self, scrape_response: ScrapeResponse):
         """process raw bytes when non-text main response was streamed.
 
-        skip if `bytes_` is None. can persist file, hash, etc.
-
-        :param scrape_response: response object (`bytes_` may be None).
+        :param scrape_response: response object.
         """
         pass
 
@@ -248,15 +246,15 @@ class CrawlResult:
         self.responses = responses
 
 class CrawlResultHandler:
-    """custom hook used by `NodriverPlusManager` when running a crawl
+    """custom hook used by `Manager` when running a crawl
 
     supply a callable to __init__ or subclass and override `handle`.
     """
 
     async def handle(self, result: CrawlResult):
-        """process finished CrawlResult (persist / summarize / metrics).
+        """final hook for when a crawl completes.
 
-        `result` is mutable and is returned by `NodriverPlus.crawl()`
+        `result` is mutable and is returned by `crawl()`
 
         :param result: crawl summary.
         """

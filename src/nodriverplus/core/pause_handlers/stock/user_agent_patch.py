@@ -12,11 +12,11 @@ async def patch_user_agent(
     connection: nodriver.Tab | nodriver.Connection,
     ev: cdp.target.AttachedToTarget | None,
     user_agent: UserAgent,
-    stealth: bool = False
+    hide_headless: bool = False
 ):
     """apply UA overrides across relevant domains for a target.
 
-    removes "Headless" when `stealth=True`
+    removes "Headless" when `hide_headless=True`
 
     sets Network + Emulation overrides and installs a runtime 
     patch so navigator + related surfaces align. worker/page aware.
@@ -24,10 +24,10 @@ async def patch_user_agent(
     :param connection: `Tab` or `Connection` to apply the patch to.
     :param ev: if `None`, `connection` must be of type `Tab`.
     :param user_agent: prepared UserAgent instance.
-    :param stealth: whether to strip "Headless" from user_agent.
+    :param hide_headless: whether to strip "Headless" from user_agent.
     """
 
-    if stealth:
+    if hide_headless:
         user_agent.user_agent = user_agent.user_agent.replace("Headless", "")
         user_agent.app_version = user_agent.app_version.replace("Headless", "")
 
@@ -66,7 +66,6 @@ async def patch_user_agent(
         await connection.send(cdp.page.add_script_to_evaluate_on_new_document(
             source=script,
             include_command_line_api=True,
-            run_immediately=True
         ), session_id)
     if can_use_domain(target_type, "Runtime"):
         await connection.send(cdp.runtime.evaluate(
@@ -86,11 +85,11 @@ class UserAgentPatch(TargetInterceptor):
     stock `TargetInterceptor` for patching user agents
     """
     user_agent: UserAgent
-    stealth: bool
+    hide_headless: bool
 
-    def __init__(self, user_agent: UserAgent, stealth: bool = False):
+    def __init__(self, user_agent: UserAgent, hide_headless: bool = False):
         self.user_agent = user_agent
-        self.stealth = stealth
+        self.hide_headless = hide_headless
 
-    async def handle(self, connection: nodriver.Connection, ev: cdp.target.AttachedToTarget):
-        await patch_user_agent(connection, ev, self.user_agent, self.stealth)
+    async def on_attach(self, connection: nodriver.Connection, ev: cdp.target.AttachedToTarget):
+        await patch_user_agent(connection, ev, self.user_agent, self.hide_headless)

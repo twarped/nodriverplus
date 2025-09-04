@@ -93,7 +93,7 @@ class WindowSizePatch(TargetInterceptor):
 		self.mobile = mobile
 		self.orientation = orientation
 
-	async def handle(
+	async def on_attach(
 		self,
 		connection: nodriver.Tab | nodriver.Connection,
 		ev: cdp.target.AttachedToTarget | None,

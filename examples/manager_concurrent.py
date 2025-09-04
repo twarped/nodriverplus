@@ -2,7 +2,7 @@ import asyncio
 import logging
 from nodriverplus import (
     NodriverPlus,
-    NodriverPlusManager,
+    Manager,
     ScrapeResponseHandler,
     CrawlResultHandler,
 )
@@ -22,7 +22,7 @@ async def main():
     ndp = NodriverPlus()
     await ndp.start()
 
-    manager = NodriverPlusManager(ndp, concurrency=2)
+    manager = Manager(ndp, concurrency=2)
     manager.start()
 
     html_handler = HtmlPreviewHandler()
