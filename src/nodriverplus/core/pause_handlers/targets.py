@@ -76,7 +76,7 @@ class TargetInterceptorManager:
                 flatten=True,
                 filter_=cdp.target.TargetFilter(filters)
             ), session_id)
-            logger.info("successfully set auto attach for %s", msg)
+            logger.debug("successfully set auto attach for %s", msg)
         except Exception:
             logger.exception("failed to set auto attach for %s:", msg)
 
@@ -92,14 +92,14 @@ class TargetInterceptorManager:
         :param ev: the event to pass to the interceptors.
         """
         if ev:
-            msg = f"{ev.target_info.type_} <{ev.target_info.url}>"
+            target_msg = f"{ev.target_info.type_} <{ev.target_info.url}>"
         elif isinstance(self.connection, Tab):
-            msg = f"tab <{self.connection.url}>"
+            target_msg = f"tab <{self.connection.url}>"
         else:
-            msg = f"connection <{self.connection}>"
+            target_msg = f"connection <{self.connection}>"
         for interceptor in self.interceptors:
             if ev:
-                msg = f"{interceptor} to {msg}"
+                msg = f"{interceptor} to {target_msg}"
             else:
                 msg = f"{interceptor} to {self.connection}"
             try:
@@ -108,7 +108,7 @@ class TargetInterceptorManager:
                 if "-32000" in str(e):
                     logger.warning("failed to apply interceptor %s: execution context not created yet", msg)
                 else: 
-                    raise
+                    logger.exception("failed to apply interceptor %s:", msg)
 
 
     async def on_attach(
@@ -129,7 +129,7 @@ class TargetInterceptorManager:
         else:
             msg = connection
             session_id = None
-        logger.info("successfully attached to %s", msg)
+        logger.debug("successfully attached to %s", msg)
 
         # apply interceptors
         await self.apply_interceptors(ev)

@@ -11,22 +11,14 @@ wraps nodriver to add:
 keeps low-level access to the underlying nodriver Browser so callers can still drive CDP directly.
 definitely still needs work tho
 """
-import asyncio
-import time
-import random
-from datetime import datetime, UTC
 import logging
 from os import PathLike
-import asyncio
-from urllib.parse import urlparse
 import nodriver
-from nodriver import Config, cdp
+from nodriver import Config
 from .user_agent import *
 from .scrape_response import *
-from ..utils import extract_links, fix_url
-from . import cloudflare
-from datetime import timedelta
-from .tab import acquire_tab, get_user_agent
+from .tab import get, get_user_agent, scrape, crawl, get_with_timeout
+from .browser import get, stop
 from .pause_handlers import TargetInterceptor, TargetInterceptorManager
 from .pause_handlers.stock import (
     UserAgentPatch, 
@@ -39,7 +31,6 @@ from .pause_handlers.stock import (
 )
 
 logger = logging.getLogger(__name__)
-
 
 
 class NodriverPlus:
@@ -131,11 +122,10 @@ class NodriverPlus:
         :return: started browser instance.
         :rtype: nodriver.Browser
         """
+        browser_args = browser_args or []
         if window_size:
             width, height = window_size
             # remove any existing --window-size arg to avoid dupes
-            if browser_args is None:
-                browser_args = []
             browser_args = [
                 arg for arg in browser_args
                 if not arg.startswith("--window-size=")
@@ -189,10 +179,12 @@ class NodriverPlus:
                 height=height,
             )
 
+        # start the `TargetInterceptorManager`
         self.interceptor_manager.connection = self.browser.connection
         await self.interceptor_manager.start()
 
         self.config = self.browser.config
+
         return self.browser
 
 
@@ -247,232 +239,24 @@ class NodriverPlus:
         :return: crawl summary
         :rtype: CrawlResult
         """
-        if scrape_response_handler is None:
-            if not collect_responses:
-                logger.warning("no handler provided and collect_responses is False, only errors and links will be captured")
-            else:
-                logger.info("no handler provided, using default handler functions")
-            scrape_response_handler = ScrapeResponseHandler()
-
-        # normalize delay range if provided
-        if delay_range is not None:
-            a, b = delay_range
-            if a > b:
-                delay_range = (b, a)
-            if a < 0 or b < 0:
-                delay_range = None  # disallow negative
-        logger.info(
-            "crawl started for %s (depth=%d concurrency=%d max_pages=%s delay=%s)",
-            url, depth, concurrency, max_pages, delay_range,
+        return await crawl(
+            self.browser,
+            url=url,
+            scrape_response_handler=scrape_response_handler,
+            depth=depth,
+            crawl_result_handler=crawl_result_handler,
+            new_window=new_window,
+            scrape_bytes=scrape_bytes,
+            navigation_timeout=navigation_timeout,
+            wait_for_page_load=wait_for_page_load,
+            page_load_timeout=page_load_timeout,
+            extra_wait_ms=extra_wait_ms,
+            concurrency=concurrency,
+            max_pages=max_pages,
+            collect_responses=collect_responses,
+            delay_range=delay_range,
+            request_paused_handler=request_paused_handler,
         )
-
-        root_url = fix_url(url)
-        depth = max(0, depth)
-        concurrency = max(1, concurrency)
-
-        time_start = datetime.now(UTC)
-
-        # queue: (url, remaining_depth)
-        queue: asyncio.Queue[tuple[str, int]] = asyncio.Queue()
-        await queue.put((root_url, depth))
-
-        # visited = fully processed
-        # all_links_set = discovered (even if not yet processed)
-        visited: set[str] = set()
-        all_links: list[str] = [root_url]
-        all_links_set: set[str] = {root_url}
-        successful_links: list[str] = []
-        failed_links: list[FailedLink] = []
-        timed_out_links: list[FailedLink] = []
-        # optional heavy list of every response captured
-        responses: list[ScrapeResponse] = [] if collect_responses else None  # type: ignore
-
-        pages_processed = 0
-        lock = asyncio.Lock()  # protects shared collections when needed
-        # map worker idx -> current url for runtime debugging
-        current_processing: dict[int, str] = {}
-
-        async def should_enqueue(link: str, remaining: int) -> bool:
-            # depth 0 should just be a single scrape
-            if remaining < 0:
-                return False
-            try:
-                link_canon = fix_url(link)
-            except Exception:
-                return False
-            if link_canon in visited or link_canon in all_links_set:
-                return False
-            parsed = urlparse(link_canon)
-            # throw interesting links away
-            if parsed.scheme not in ("http", "https"):
-                return False
-            async with lock:  # race-safe insertion into discovery sets
-                if link_canon not in all_links_set:
-                    all_links_set.add(link_canon)
-                    all_links.append(link_canon)
-            return True
-
-        instance: nodriver.Tab | nodriver.Browser = self.browser
-        if new_window:
-            # create a dedicated browser context + window; tabs we spawn will stay in this context
-            instance = await acquire_tab(self.browser, new_window=True, new_context=True)
-
-        async def worker(idx: int):
-            nonlocal pages_processed
-            while True:
-                try:
-                    # wait for next target
-                    current_url, remaining_depth = await queue.get()
-                except asyncio.CancelledError:
-                    break
-                # register current work for debugging/monitoring
-                try:
-                    current_processing[idx] = current_url
-                except Exception:
-                    current_processing[idx] = str(current_url)
-                if current_url in visited:
-                    # clear current marker before finishing item
-                    current_processing.pop(idx, None)
-                    queue.task_done()
-                    continue
-                visited.add(current_url)
-                if max_pages is not None and pages_processed >= max_pages:
-                    current_processing.pop(idx, None)
-                    queue.task_done()
-                    continue
-                error_obj: Exception | None = None
-                scrape_response: ScrapeResponse | None = None
-                try:
-                    is_first_depth = remaining_depth + 1 == depth
-                    # simple delay / jitter if specified; skip if first scrape
-                    if delay_range is not None and is_first_depth:
-                        wait_time = random.uniform(*delay_range)
-                        logger.info("waiting %.2f seconds before scraping %s", wait_time, current_url)
-                        await asyncio.sleep(wait_time)
-                    scrape_response = await self.scrape(
-                        current_url,
-                        scrape_bytes,
-                        instance,
-                        scrape_response_handler,
-                        navigation_timeout=navigation_timeout,
-                        wait_for_page_load=wait_for_page_load,
-                        page_load_timeout=page_load_timeout,
-                        extra_wait_ms=extra_wait_ms,
-                        new_tab=True,
-                        request_paused_handler=request_paused_handler,
-                    )
-                    pages_processed += 1
-                    links: list[str] = []
-                    try:
-                        # remember: the handler can mutate links
-                        links = await scrape_response_handler.handle(scrape_response) or []
-                    except Exception as e:
-                        error_obj = e
-                        logger.exception("failed running handler for %s:", current_url)
-                    finally:
-                        if scrape_response.tab:
-                            # avoid closing tabs twice
-                            if not (new_window and scrape_response.tab is instance):
-                                # run close in its own task so a hung 
-                                # protocol `Transaction` can't block join()
-                                t = asyncio.create_task(scrape_response.tab.close())
-                                t.add_done_callback(lambda f: logger.info("tab closed: %s", f.result()))
-
-                    # scrape timed out or failed
-                    if scrape_response.timed_out_navigating:
-                        timed_out_links.append(FailedLink(current_url, scrape_response.timed_out_navigating, error_obj))
-                    elif error_obj:
-                        failed_links.append(FailedLink(current_url, scrape_response.timed_out_navigating, error_obj))
-                    else:
-                        # scrape was a success
-                        # record the final URL if the page redirected
-                        final_url = getattr(scrape_response, "url", None) or (scrape_response.tab.url if scrape_response.tab else current_url)
-                        try:
-                            final_url = fix_url(final_url)
-                        except Exception:
-                            final_url = final_url or current_url
-
-                        async with lock:
-                            if final_url not in all_links_set:
-                                all_links_set.add(final_url)
-                                all_links.append(final_url)
-
-                        successful_links.append(final_url)
-
-                    if collect_responses and scrape_response:
-                        async with lock:
-                            responses.append(scrape_response)
-
-                    next_remaining = remaining_depth - 1
-                    # depth 0 should still be allowed because depth
-                    # 1 should be actually scraping with a depth
-                    if next_remaining > -1 and links:
-                        for link in links:
-                            if max_pages is not None and pages_processed >= max_pages:
-                                break
-                            if await should_enqueue(link, next_remaining):
-                                await queue.put((fix_url(link), next_remaining))
-                except Exception as e:
-                    failed_links.append(FailedLink(current_url, False, e))
-                    logger.exception("unexpected error during crawl for %s", current_url)
-                finally:
-                    # clear current marker and mark as done so join can finish
-                    current_processing.pop(idx, None)
-                    queue.task_done()
-
-        workers = [asyncio.create_task(worker(i)) for i in range(concurrency)]
-
-        # wait until everything is finished
-        await queue.join()
-        for w in workers:
-            w.cancel()
-        # we're trying to cancel everything
-        # so ignore CancelledError
-        for w in workers:
-            try:
-                await w
-            except asyncio.CancelledError:
-                pass
-
-        if new_window and isinstance(instance, nodriver.Tab):
-            # close the dedicated context tab with a timeout to avoid hangs
-            try:
-                t = asyncio.create_task(instance.close())
-                await asyncio.wait_for(t, timeout=5)
-            except asyncio.TimeoutError:
-                logger.warning("timeout closing dedicated context tab (continuing)")
-                t.cancel()
-            except Exception:
-                logger.debug("failed closing dedicated context tab (already closed?)")
-
-        time_end = datetime.now(UTC)
-        time_elapsed = time_end - time_start
-        result = CrawlResult(
-            links=all_links,
-            successful_links=successful_links,
-            failed_links=failed_links,
-            timed_out_links=timed_out_links,
-            time_start=time_start,
-            time_end=time_end,
-            time_elapsed=time_elapsed,
-            responses=responses,
-        )
-
-        if crawl_result_handler:
-            await crawl_result_handler.handle(result)
-            result.time_end = datetime.now(UTC)
-            result.time_elapsed = result.time_end - time_start
-
-        logger.info(
-            "successfully finished crawl for %s (pages=%d success=%d failed=%d timed_out=%d elapsed=%.2fs)",
-            url,
-            len(all_links),
-            len(successful_links),
-            len(failed_links),
-            len(timed_out_links),
-            (time_end - time_start).total_seconds(),
-        )
-        return result
 
 
     # TODO: refactor NodriverPlus to pull from 
@@ -480,7 +264,6 @@ class NodriverPlus:
     async def scrape(self, 
         url: str,
         scrape_bytes = True,
-        existing_tab: nodriver.Tab | None = None,
         scrape_response_handler: ScrapeResponseHandler | None = None,
         *,
         navigation_timeout = 30,
@@ -491,6 +274,9 @@ class NodriverPlus:
         new_tab = False,
         new_window = False,
         request_paused_handler = ScrapeRequestPausedHandler,
+        proxy_server: str = None,
+        proxy_bypass_list: list[str] = None,
+        origins_with_universal_network_access: list[str] = None,
     ):
         """single page scrape (html + optional bytes + link extraction).
 
@@ -503,10 +289,14 @@ class NodriverPlus:
         `scrape_response_handler` could be useful if you want to execute stuff on `tab`
         after the page loads, but before the `RequestPausedHandler` is removed
 
+        - **`proxy_server`** — (EXPERIMENTAL) (Optional) Proxy server, similar to the one passed to --proxy-server
+        - **`proxy_bypass_list`** — (EXPERIMENTAL) (Optional) Proxy bypass list, similar to the one passed to --proxy-bypass-list
+        - **`origins_with_universal_network_access`** — (EXPERIMENTAL) (Optional) An optional list of origins to grant unlimited cross-origin access to. Parts of the URL other than those constituting origin are ignored.
+
         :param url: target url.
         :param scrape_bytes: capture non-text body bytes.
-        :param existing_tab: reuse provided tab/browser root or create fresh.
         :param scrape_response_handler: if specified, `scrape_response_handler.handle()` will be called 
+        :param existing_tab: reuse provided tab/browser root or create fresh.
         and awaited before returning the final `ScrapeResponse`
         :param navigation_timeout: seconds for initial navigation.
         :param wait_for_page_load: await full load event.
@@ -517,116 +307,32 @@ class NodriverPlus:
         :param request_paused_handler: custom fetch interception handler.
         **must be a type**—not an instance—so that it can be initiated later with the correct values attached
         :type request_paused_handler: type[ScrapeRequestPausedHandler]
+        :param proxy_server: (EXPERIMENTAL) (Optional) Proxy server, similar to the one passed to --proxy-server
+        :param proxy_bypass_list: (EXPERIMENTAL) (Optional) Proxy bypass list, similar to the one passed to --proxy-bypass-list
+        :param origins_with_universal_network_access: (EXPERIMENTAL) (Optional) An optional list of origins to grant unlimited cross-origin access to. Parts of the URL other than those constituting origin are ignored.
         :return: html/links/bytes/metadata
         :rtype: ScrapeResponse
         """
         
-        start = time.monotonic()
-        target = existing_tab or self.browser
-        url = fix_url(url)
-
-        scrape_response = ScrapeResponse(url)
-        parsed_url = urlparse(url)
-
-        if target is None:
-            raise ValueError("browser was never started! start with `NodriverPlus.start(**kwargs)`")
-        # central acquisition
-        tab = await acquire_tab(
-            target, 
-            new_window=new_window, 
-            new_tab=new_tab, 
+        return await scrape(
+            base=self.browser,
+            url=url,
+            scrape_bytes=scrape_bytes,
+            scrape_response_handler=scrape_response_handler,
+            navigation_timeout=navigation_timeout,
+            wait_for_page_load=wait_for_page_load,
+            page_load_timeout=page_load_timeout,
+            extra_wait_ms=extra_wait_ms,
+            new_tab=new_tab,
+            new_window=new_window,
+            request_paused_handler=request_paused_handler,
+            proxy_server=proxy_server,
+            proxy_bypass_list=proxy_bypass_list,
+            origins_with_universal_network_access=origins_with_universal_network_access
         )
-        scrape_response.tab = tab
-        logger.info("scraping %s", url)
-
-        await tab.send(cdp.network.enable())
-        await tab.send(
-            cdp.network.set_extra_http_headers(
-                headers=cdp.network.Headers({
-                    "Referer": f"{parsed_url.scheme}://{parsed_url.netloc}",
-                })
-            )
-        )
-
-        # use the stock handler unless a custom one is provided
-        request_paused_handler = (request_paused_handler or ScrapeRequestPausedHandler)(
-            tab, scrape_response, url, scrape_bytes
-        )
-        await request_paused_handler.start()
-
-        try:
-            nav_response = await self.get_with_timeout(tab, url, 
-                navigation_timeout=navigation_timeout, 
-                wait_for_page_load=wait_for_page_load, 
-                page_load_timeout=page_load_timeout, 
-                extra_wait_ms=extra_wait_ms
-            )
-            scrape_response.timed_out = nav_response.timed_out
-            scrape_response.timed_out_navigating = nav_response.timed_out_navigating
-            scrape_response.timed_out_loading = nav_response.timed_out_loading
-            if nav_response.timed_out_navigating:
-                return scrape_response
-
-            # prefer the tab's final URL (handles redirects) and record it on the ScrapeResponse
-            final_url = nav_response.tab.url if getattr(nav_response, "tab", None) and nav_response.tab.url else url
-            scrape_response.url = fix_url(final_url)
-
-            # if it's taking forever to load, get_content() will also take forever to load
-            if scrape_response.timed_out_loading:
-                # fast path: avoid get_content() which can hang when load timed out
-                val = await scrape_response.tab.evaluate("document.documentElement.outerHTML")
-                if isinstance(val, cdp.runtime.ExceptionDetails):
-                    logger.warning("failed evaluating outerHTML for %s after load timeout; treating as empty doc", url)
-                    scrape_response.html = ""
-                else:
-                    scrape_response.html = val if isinstance(val, str) else str(val)
-            else:
-                scrape_response.html = await nav_response.tab.get_content()
-            # use the final URL as the base for extracting links
-            scrape_response.links = extract_links(scrape_response.html, final_url)
-            if cloudflare.should_wait(scrape_response.html):
-                logger.info("detected potentially interactable cloudflare challenge in %s", url)
-            scrape_response.elapsed = timedelta(seconds=time.monotonic() - start)
-            elapsed_seconds = scrape_response.elapsed.total_seconds()
-            logger.info("successfully finished scrape for %s (elapsed=%.2fs)", url, elapsed_seconds)
-        except Exception:
-            scrape_response.elapsed = timedelta(seconds=time.monotonic() - start)
-            elapsed_seconds = scrape_response.elapsed.total_seconds()
-            logger.exception("unexpected error during scrape for %s (elapsed=%.2fs):", url, elapsed_seconds)
-
-        if scrape_response_handler:
-            await scrape_response_handler.handle(scrape_response)
-        await request_paused_handler.stop()
-
-        return scrape_response
-    
-
-    async def wait_for_page_load(self, tab: nodriver.Tab, extra_wait_ms: int = 0):
-        """wait for load event (or immediate if already complete) then optional delay.
-
-        :param tab: target tab.
-        :param extra_wait_ms: additional ms sleep via setTimeout after load.
-        """
-        await tab.evaluate("""
-            new Promise(r => {
-                if (document.readyState === "complete") {
-                    r();
-                } else {
-                    window.addEventListener("load", r);
-                }
-            })
-        """, await_promise=True)
-        logger.debug("successfully finished loading %s", tab.url)
-        if extra_wait_ms:
-            logger.debug("waiting extra %d ms for %s", extra_wait_ms, tab.url)
-            await tab.evaluate(
-                f"new Promise(r => setTimeout(r, {extra_wait_ms}));",
-                await_promise=True
-            )
 
 
     async def get_with_timeout(self, 
-        tab: nodriver.Tab | nodriver.Browser, 
         url: str, 
         *,
         navigation_timeout = 30,
@@ -651,68 +357,67 @@ class NodriverPlus:
         :return: partial ScrapeResponse (timing + timeout flags).
         :rtype: ScrapeResponse
         """
-        scrape_response = ScrapeResponse(url, tab, True)
-
-        start = time.monotonic()
-        # prepare target first when we need a new tab/window/context
-        base = tab
-        if new_tab or new_window:
-            try:
-                base = await acquire_tab(
-                    tab if isinstance(tab, nodriver.Tab) else self.browser,
-                    "about:blank",
-                    new_window=new_window,
-                    new_tab=new_tab,
-                    new_context=new_window,
-                )
-            except Exception:
-                logger.exception("failed acquiring tab; falling back to provided target")
-        nav_task = asyncio.create_task(base.get(url))
-        try:
-            # cancelling nav_task will cause throw an InvalidStateError
-            # if the Transaction hasn't finished yet
-            base = await asyncio.wait_for(asyncio.shield(nav_task), timeout=navigation_timeout)
-            scrape_response.tab = base
-        except asyncio.TimeoutError:
-            scrape_response.timed_out_navigating = True
-            scrape_response.elapsed = timedelta(seconds=time.monotonic() - start)
-            logger.warning("timed out getting %s (navigation phase) (elapsed=%.2fs)", url, scrape_response.elapsed.total_seconds())
-            return scrape_response
-
-        if wait_for_page_load:    
-            load_task = asyncio.create_task(self.wait_for_page_load(base, extra_wait_ms))
-            try:
-                # same thing here
-                await asyncio.wait_for(
-                    asyncio.shield(load_task), 
-                    timeout=page_load_timeout + extra_wait_ms / 1000
-                )
-            except asyncio.TimeoutError:
-                scrape_response.timed_out_loading = True
-                scrape_response.elapsed = timedelta(seconds=time.monotonic() - start)
-                logger.warning("timed out getting %s (load phase) (elapsed=%.2fs)", url, scrape_response.elapsed.total_seconds())
-                # wait for task to actually cancel
-                if not load_task.done():
-                    load_task.cancel()
-                    try:
-                        await load_task
-                    except asyncio.CancelledError:
-                        pass
-                return scrape_response
-
-        scrape_response.timed_out = False
-        scrape_response.elapsed = timedelta(seconds=time.monotonic() - start)
-        return scrape_response
+        return await get_with_timeout(
+            target=self.browser,
+            url=url,
+            navigation_timeout=navigation_timeout,
+            wait_for_page_load=wait_for_page_load,
+            page_load_timeout=page_load_timeout,
+            extra_wait_ms=extra_wait_ms,
+            new_tab=new_tab,
+            new_window=new_window
+        )
     
+
+    async def get(self,
+        url: str = "about:blank",
+        *,
+        new_tab: bool = False,
+        new_window: bool = True,
+        new_context: bool = True,
+        dispose_on_detach: bool = True,
+        proxy_server: str = None,
+        proxy_bypass_list: list[str] = None,
+        origins_with_universal_network_access: list[str] = None,
+    ) -> nodriver.Tab:
+        """central factory for new/reused tabs/windows/contexts.
+
+        honors combinations of `new_window`/`new_tab`/`new_context` on `base`.
+        
+        see https://github.com/twarped/nodriver/commit/1dcb52e8063bad359a3f2978b83f44e20dfbca68
+
+        - **`dispose_on_detach`** — (EXPERIMENTAL) (Optional) If specified, disposes this context when debugging session disconnects.
+        - **`proxy_server`** — (EXPERIMENTAL) (Optional) Proxy server, similar to the one passed to --proxy-server
+        - **`proxy_bypass_list`** — (EXPERIMENTAL) (Optional) Proxy bypass list, similar to the one passed to --proxy-bypass-list
+        - **`origins_with_universal_network_access`** — (EXPERIMENTAL) (Optional) An optional list of origins to grant unlimited cross-origin access to. Parts of the URL other than those constituting origin are ignored.
+
+        :param url: initial navigation (about:blank by default).
+        :param new_window: request a separate window (may create context).
+        :param new_tab: request a new tab in existing window/context.
+        :param new_context: create an isolated context when opening window.
+        :param dispose_on_detach: (EXPERIMENTAL) (Optional) If specified, disposes this context when debugging session disconnects.
+        :param proxy_server: (EXPERIMENTAL) (Optional) Proxy server, similar to the one passed to --proxy-server
+        :param proxy_bypass_list: (EXPERIMENTAL) (Optional) Proxy bypass list, similar to the one passed to --proxy-bypass-list
+        :param origins_with_universal_network_access: (EXPERIMENTAL) (Optional) An optional list of origins to grant unlimited cross-origin access to. Parts of the URL other than those constituting origin are ignored.
+        :return: acquired/created tab
+        :rtype: Tab
+        """
+        return await get(
+            base=self.browser,
+            url=url,
+            new_tab=new_tab,
+            new_window=new_window,
+            new_context=new_context,
+            dispose_on_detach=dispose_on_detach,
+            proxy_server=proxy_server,
+            proxy_bypass_list=proxy_bypass_list,
+            origins_with_universal_network_access=origins_with_universal_network_access
+        )
+
 
     async def stop(self, graceful = True):
         """stop browser process (optionally wait for graceful exit).
 
         :param graceful: wait for underlying process to exit.
         """
-        logger.info("stopping browser")
-        self.browser.stop()
-        if graceful:
-            logger.info("waiting for graceful shutdown")
-            await self.browser._process.wait()
-        logger.info("successfully shutdown browser")
+        await stop(self.browser, graceful)
