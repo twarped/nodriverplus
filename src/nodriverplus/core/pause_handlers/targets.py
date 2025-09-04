@@ -145,6 +145,7 @@ class TargetInterceptorManager:
             else:
                 msg = f"{interceptor} to {self.connection}"
             try:
+                logger.debug("applying interceptor (on_attach) %s", msg)
                 await interceptor.on_attach(self.connection, ev)
             except Exception as e:
                 if "-32000" in str(e):
@@ -179,6 +180,7 @@ class TargetInterceptorManager:
         await self.set_hook(ev)
         # continue like normal
         try:
+            logger.debug("resuming target %s (session_id=%s)", msg, session_id)
             await connection.send(cdp.runtime.run_if_waiting_for_debugger(), session_id)
         except Exception as e:
             if "-32001" in str(e):

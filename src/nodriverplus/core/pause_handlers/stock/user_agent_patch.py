@@ -43,6 +43,7 @@ async def patch_user_agent(
     domains_patched = []
 
     if can_use_domain(target_type, "Network"):
+        logger.debug("patching user agent for %s with domain: \"Network\"", msg)
         await connection.send(cdp.network.set_user_agent_override(
             user_agent=user_agent.user_agent,
             accept_language=user_agent.accept_language,
@@ -51,6 +52,7 @@ async def patch_user_agent(
         ), session_id)
         domains_patched.append("Network")
     if can_use_domain(target_type, "Emulation"):
+        logger.debug("patching user agent for %s with domain: \"Emulation\"", msg)
         await connection.send(cdp.emulation.set_user_agent_override(
             user_agent=user_agent.user_agent,
             accept_language=user_agent.accept_language,
@@ -92,4 +94,8 @@ class UserAgentPatch(TargetInterceptor):
         self.hide_headless = hide_headless
 
     async def on_attach(self, connection: nodriver.Connection, ev: cdp.target.AttachedToTarget):
+        await patch_user_agent(connection, ev, self.user_agent, self.hide_headless)
+
+    async def on_change(self, connection, ev, session_id):
+        ev.session_id = session_id
         await patch_user_agent(connection, ev, self.user_agent, self.hide_headless)

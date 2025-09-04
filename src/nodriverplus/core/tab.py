@@ -432,7 +432,6 @@ async def scrape(
     scrape_response.tab = tab
     logger.info("scraping %s", url)
 
-    await tab.send(cdp.network.enable())
     await tab.send(
         cdp.network.set_extra_http_headers(
             headers=cdp.network.Headers({
@@ -445,7 +444,7 @@ async def scrape(
     request_paused_handler = (request_paused_handler or ScrapeRequestPausedHandler)(
         tab, scrape_response, url, scrape_bytes
     )
-    # await request_paused_handler.start()
+    await request_paused_handler.start()
 
     try:
         nav_response = await get_with_timeout(

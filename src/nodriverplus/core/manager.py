@@ -320,9 +320,4 @@ class Manager:
             await asyncio.wait_for(asyncio.to_thread(self.queue.join), timeout)
         else:
             await asyncio.to_thread(self.queue.join)
-
-
-# backward compatible alias (deprecated)
-class Manager(Manager):  # pragma: no cover - simple alias
-    pass
     

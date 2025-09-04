@@ -39,7 +39,7 @@ async def patch_window_size(
 		session_id = ev.session_id
 		msg = f"{target_type} <{ev.target_info.url}>"
 
-	if not can_use_domain(target_type, "Emulation"):
+	if not can_use_domain(target_type, "Emulation") or target_type not in ("page", "tab", "iframe"):
 		logger.debug("skipping window size patch for %s", msg)
 		return
 
