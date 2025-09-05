@@ -351,13 +351,15 @@ class RequestPausedHandler:
                 else:
                     # unknown type - skip encoding and let chrome handle (will likely fail)
                     logger.debug("unexpected post_data type for %s: %r", ev.request.url, type(post_data))
+        header_entries = [cdp.fetch.HeaderEntry(name=key, value=value) for key, value in ev.request.headers.items()]
+        logger.info("continuing request for %s with headers:\n%s", ev.request.url, header_entries)
         await self.tab.send(
             cdp.fetch.continue_request(
                 ev.request_id,
                 ev.request.url,
                 ev.request.method,
                 post_data,
-                [cdp.fetch.HeaderEntry(name=key, value=value) for key, value in ev.request.headers.items()],
+                header_entries,
                 await self.should_intercept_response(ev)
             )
         )
@@ -460,9 +462,6 @@ class RequestPausedHandler:
 
         :param ev: interception event carrying response metadata.
         """
-        # we intentionally do NOT inject cross-origin * policy headers here.
-        # modifying subresource headers does not bypass a top-level COEP requirement and risks
-        # masking real site policies. we forward original headers untouched.
         await self.tab.send(
             cdp.fetch.continue_response(
                 ev.request_id,

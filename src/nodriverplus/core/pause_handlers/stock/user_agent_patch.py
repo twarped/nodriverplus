@@ -98,4 +98,9 @@ class UserAgentPatch(TargetInterceptor):
 
     async def on_change(self, connection, ev, session_id):
         ev.session_id = session_id
-        await patch_user_agent(connection, ev, self.user_agent, self.hide_headless)
+        try:
+            await patch_user_agent(connection, ev, self.user_agent, self.hide_headless)
+        except Exception as e:
+            s = str(e)
+            if not ("-32000" in s or "-32001" in s or "-32601" in s):
+                logger.exception("failed patching user agent for %s <%s>:", ev.target_info.type_, ev.target_info.url)

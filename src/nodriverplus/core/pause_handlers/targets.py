@@ -74,7 +74,10 @@ class TargetInterceptorManager:
         :param ev: optional original attach event (when recursively called).
         """
         connection = self.connection
-        filters = [{"type": "tab", "exclude": True}]
+        filters = [
+            {"type": "tab", "exclude": True},
+            {"type": "iframe", "exclude": True}
+        ]
 
         if ev:
             msg = f"{ev.target_info.type_} <{ev.target_info.url}>"
@@ -95,8 +98,13 @@ class TargetInterceptorManager:
                 filter_=cdp.target.TargetFilter(filters)
             ), session_id)
             logger.debug("successfully set auto attach for %s", msg)
-        except Exception:
-            logger.exception("failed to set auto attach for %s:", msg)
+        except Exception as e:
+            if "-32001" in str(e):
+                logger.warning("failed to set auto attach for %s: session not found. (potential timing issue?)", msg)
+            elif "-32601" in str(e):
+                logger.warning("failed to set auto attach for %s: method not found", msg)
+            else:
+                logger.exception("failed to set auto attach for %s:", msg)
 
 
     async def interceptors_on_change(
@@ -150,6 +158,8 @@ class TargetInterceptorManager:
             except Exception as e:
                 if "-32000" in str(e):
                     logger.warning("failed to apply interceptor (on_attach) %s: execution context not created yet", msg)
+                elif "-32001" in str(e):
+                    logger.warning("failed to apply interceptor (on_attach) %s: session not found. (potential timing issue?)", msg)
                 else: 
                     logger.exception("failed to apply interceptor (on_attach) %s:", msg)
 
@@ -180,7 +190,7 @@ class TargetInterceptorManager:
         await self.set_hook(ev)
         # continue like normal
         try:
-            logger.debug("resuming target %s (session_id=%s)", msg, session_id)
+            logger.debug("resuming %s (session_id=%s)", msg, session_id)
             await connection.send(cdp.runtime.run_if_waiting_for_debugger(), session_id)
         except Exception as e:
             if "-32001" in str(e):
