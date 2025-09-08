@@ -1,4 +1,10 @@
-"""fetch pause interception helpers (request + auth) layered over raw `nodriver` events.
+"""
+# **TODO/NOTE:**
+intercepting requests this way for some reason stops sandboxed iframes from
+being able to run scripts. with this enabled, Cloudflare will never solve if
+you intercept the main page. (definitely an issue for PDF scraping)
+
+fetch pause interception helpers (request + auth) layered over raw `nodriver` events.
 
 adds structured async hooks around `Fetch.requestPaused` / `Fetch.authRequired` so callers can:
 - inspect / mutate request + response phases (fail, fulfill, stream, continue)
@@ -111,7 +117,18 @@ class RequestMeta:
 
 
 class RequestPausedHandler:
-    """orchestrates request/response interception for a single tab.
+    """
+    # **TODO/NOTE:**
+    for some reason, intercepting requests triggers this error in sandboxed iframes:
+    
+    `Blocked script execution in 'about:blank' because the document's 
+    frame is sandboxed and the 'allow-scripts' permission is not set.`
+
+    this triggers cloudflare so that you won't ever receive a cf_clearance token.
+    definitely needs fixed.
+
+    # overview:
+    orchestrates request/response interception for a single tab.
 
     **note**: can remove the `Range` header from requests in `_annotate_request_navigation()`
 
@@ -551,7 +568,7 @@ class RequestPausedHandler:
         await self.tab.send(cdp.fetch.enable())
         await self.tab.send(cdp.network.enable())
         # ensure chrome always loads fresh bytes
-        await self.tab.send(cdp.network.set_cache_disabled(True))
+        # await self.tab.send(cdp.network.set_cache_disabled(True))
         self.tab.add_handler(cdp.fetch.RequestPaused, self.handle)
 
 

@@ -1,10 +1,62 @@
+import asyncio
 import logging
-from typing import Callable, Coroutine
+from typing import Awaitable, Callable
 from nodriver import cdp, Tab, Connection, Browser
 import nodriver
 from ..cdp_helpers import can_use_domain
 
 logger = logging.getLogger(__name__)
+
+class NetworkWatcher:
+
+    async def on_response(self, 
+        tab: Tab,
+        ev: cdp.network.ResponseReceived,
+        extra_info: cdp.network.ResponseReceivedExtraInfo | None,
+    ):
+        """
+        handle a `ResponseReceived` event
+        
+        :param connection: the `Tab` the event was received on.
+        :param ev: the `ResponseReceived` event.
+        :param extra_info: the `ResponseReceivedExtraInfo` event, if available.
+        """
+        pass
+
+    async def on_response_extra_info(self,
+        ev: cdp.network.ResponseReceivedExtraInfo,
+    ):
+        """
+        handle a `ResponseReceivedExtraInfo` event
+        
+        :param ev: the `ResponseReceivedExtraInfo` event.
+        """
+        pass
+
+    async def on_request(self,
+        tab: Tab,
+        ev: cdp.network.RequestWillBeSent,
+        extra_info: cdp.network.RequestWillBeSentExtraInfo | None,
+    ):
+        """
+        handle a `RequestWillBeSent` event
+
+        :param connection: the `Tab` the event was received on.
+        :param ev: the `RequestWillBeSent` event.
+        :param extra_info: the `RequestWillBeSentExtraInfo` event, if available.
+        """
+        pass
+
+    async def on_request_extra_info(self,
+        ev: cdp.network.RequestWillBeSentExtraInfo
+    ):
+        """
+        handle a `RequestWillBeSentExtraInfo` event
+
+        :param ev: the RequestWillBeSentExtraInfo event.
+        """
+        pass
+
 
 class TargetInterceptor:
     """base class for a target interceptor
@@ -29,13 +81,12 @@ class TargetInterceptor:
 
     async def on_change(
         self,
-        connection: Tab | Connection,
+        tab: Tab | Connection,
         ev: cdp.target.TargetInfoChanged | None,
-        session_id: str,
     ):
         """hook for handling target change events
 
-        :param connection: the connection to the target.
+        :param tab: the Tab instance where the event was received.
         :param ev: the target info changed event
         :type ev: TargetInfoChanged | None
         """
@@ -43,14 +94,11 @@ class TargetInterceptor:
 
 
 class TargetInterceptorManager:
-    connection: Tab | Connection
-    interceptors: list[TargetInterceptor]
-    # [target_id: session_id]
-    session_ids: dict[str, str]
 
     def __init__(self, 
         session: Tab | Connection | Browser = None, 
-        interceptors: list[TargetInterceptor] = []
+        interceptors: list[TargetInterceptor] = [],
+        response_received_handlers: list[NetworkWatcher] = []
     ):
         """init TargetInterceptorManager
 
@@ -60,7 +108,14 @@ class TargetInterceptorManager:
         """
         self.connection = session.connection if isinstance(session, Browser) else session
         self.interceptors = interceptors
-        self.session_ids = {}
+        self.response_received_handlers = response_received_handlers
+        self.already_received_responses = set()
+        self.already_sent_requests = set()
+        self.requests_to_tab: dict[str, Tab] = {}
+        self.responses_to_tab: dict[str, Tab] = {}
+        self.responses_extra_info: dict[str, cdp.network.ResponseReceivedExtraInfo] = {}
+        self.requests_extra_info: dict[str, cdp.network.RequestWillBeSentExtraInfo] = {}
+        self.target_id_to_connection: dict[str, Tab | Connection] = {}
 
 
     async def set_hook(
@@ -82,14 +137,17 @@ class TargetInterceptorManager:
         if ev:
             msg = f"{ev.target_info.type_} <{ev.target_info.url}>"
             session_id = ev.session_id
-            self.session_ids[ev.target_info.target_id] = session_id
             # service workers will show up twice if allowed to populate on Page events
             if ev.target_info.type_ == "page":
                 filters.append({"type": "service_worker", "exclude": True})
+                # network can only be enabled on page targets
+                await connection.send(cdp.network.enable(), session_id)
+
         else:
             msg = connection
             session_id = None
         filters.append({})
+
         try:
             await connection.send(cdp.target.set_auto_attach(
                 auto_attach=True,
@@ -107,6 +165,42 @@ class TargetInterceptorManager:
                 logger.exception("failed to set auto attach for %s:", msg)
 
 
+    # `target_id` and `frame_id` are the same for tabs
+    # so as long as we only enable network for page targets
+    # we can find the tab like this: 
+    # (if `None`, it probably doesn't matter)
+    async def on_response_received(self, ev: cdp.network.ResponseReceived):
+        tab = next((t for t in self.connection.browser.tabs if t.target_id == ev.frame_id), None)
+        if tab is None:
+            logger.debug("no tab found for ResponseReceived <%s> with target_id %s", ev.response.url, ev.frame_id)
+            return
+        for handler in self.response_received_handlers:
+            await handler.on_response(tab, ev, self.responses_extra_info.get(ev.request_id))
+        self.responses_extra_info.pop(ev.request_id, None)
+
+    
+    async def on_response_received_extra_info(self, ev: cdp.network.ResponseReceivedExtraInfo):
+        self.responses_extra_info[ev.request_id] = ev
+        for handler in self.response_received_handlers:
+            await handler.on_response_extra_info(ev)
+
+
+    async def on_request_will_be_sent(self, ev: cdp.network.RequestWillBeSent):
+        tab = next((t for t in self.connection.browser.tabs if t.target_id == ev.frame_id), None)
+        if tab is None:
+            logger.debug("no tab found for RequestWillBeSent <%s> with target_id %s", ev.request.url, ev.frame_id)
+            return
+        for handler in self.response_received_handlers:
+            await handler.on_request(tab, ev, self.requests_extra_info.get(ev.request_id))
+        self.requests_extra_info.pop(ev.request_id, None)
+
+    
+    async def on_request_will_be_sent_extra_info(self, ev: cdp.network.RequestWillBeSentExtraInfo):
+        self.requests_extra_info[ev.request_id] = ev
+        for handler in self.response_received_handlers:
+            await handler.on_request_extra_info(ev)
+
+
     async def interceptors_on_change(
         self,
         ev: cdp.target.TargetInfoChanged,
@@ -117,10 +211,12 @@ class TargetInterceptorManager:
         :param ev: the event to pass to the interceptors.
         """
         target_msg = f"{ev.target_info.type_} <{ev.target_info.url}>"
+        connection = self.target_id_to_connection.get(ev.target_info.target_id) or self.connection
         for interceptor in self.interceptors:
             msg = f"{interceptor} to {target_msg}"
             try:
-                await interceptor.on_change(self.connection, ev, self.session_ids.get(ev.target_info.target_id))
+                ev.session_id = None
+                await interceptor.on_change(connection, ev)
             except Exception as e:
                 if "-32000" in str(e):
                     logger.warning("failed to apply interceptor (on_change) %s: execution context not created yet", msg)
@@ -143,6 +239,7 @@ class TargetInterceptorManager:
         """
         if ev:
             target_msg = f"{ev.target_info.type_} <{ev.target_info.url}>"
+
         elif isinstance(self.connection, Tab):
             target_msg = f"tab <{self.connection.url}>"
         else:
@@ -179,6 +276,11 @@ class TargetInterceptorManager:
         if ev is not None:
             msg = f"{ev.target_info.type_} <{ev.target_info.url}>"
             session_id = ev.session_id
+            tab = next((t for t in connection.browser.tabs if t.target_id == ev.target_info.target_id), None)
+            if tab:
+                self.target_id_to_connection[ev.target_info.target_id] = tab
+            else:
+                self.target_id_to_connection[ev.target_info.target_id] = connection
         else:
             msg = connection
             session_id = None
@@ -217,4 +319,17 @@ class TargetInterceptorManager:
         connection.add_handler(cdp.target.AttachedToTarget, self.on_attach)
         # subscribe to target changes as well
         connection.add_handler(cdp.target.TargetInfoChanged, self.interceptors_on_change)
+        # enable network watchers
+        connection.add_handler(cdp.network.ResponseReceived, 
+            self.on_response_received
+        )
+        connection.add_handler(cdp.network.ResponseReceivedExtraInfo,
+            self.on_response_received_extra_info
+        )
+        connection.add_handler(cdp.network.RequestWillBeSent, 
+            self.on_request_will_be_sent
+        )
+        connection.add_handler(cdp.network.RequestWillBeSentExtraInfo,
+            self.on_request_will_be_sent_extra_info
+        )
         await self.set_hook(None)

@@ -9,7 +9,7 @@ from nodriverplus import (
 from nodriverplus.utils import to_markdown, get_type
 
 
-@pytest.mark.suite
+@pytest.mark.integration
 @pytest.mark.browser
 @pytest.mark.network
 @pytest.mark.manager

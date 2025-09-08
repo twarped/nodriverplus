@@ -1,7 +1,7 @@
 import logging
 import nodriver
 from nodriver import cdp
-from ..targets import TargetInterceptor
+from ..target_intercepted import TargetInterceptor
 from ...user_agent import UserAgent
 from ...cdp_helpers import can_use_domain
 from ....js.load import load_text as load_js
@@ -30,7 +30,7 @@ async def patch_user_agent(
     if hide_headless:
         user_agent.user_agent = user_agent.user_agent.replace("Headless", "")
         user_agent.app_version = user_agent.app_version.replace("Headless", "")
-
+        
     if isinstance(connection, nodriver.Tab) and ev is None:
         target_type = "tab"
         msg = f"{target_type} <{connection.url}>"
@@ -96,10 +96,9 @@ class UserAgentPatch(TargetInterceptor):
     async def on_attach(self, connection: nodriver.Connection, ev: cdp.target.AttachedToTarget):
         await patch_user_agent(connection, ev, self.user_agent, self.hide_headless)
 
-    async def on_change(self, connection, ev, session_id):
-        ev.session_id = session_id
+    async def on_change(self, tab, ev):
         try:
-            await patch_user_agent(connection, ev, self.user_agent, self.hide_headless)
+            await patch_user_agent(tab, ev, self.user_agent, self.hide_headless)
         except Exception as e:
             s = str(e)
             if not ("-32000" in s or "-32001" in s or "-32601" in s):

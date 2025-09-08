@@ -11,6 +11,7 @@ dependencies = [
     "beautifulsoup4>=4.13.5",
     "html-to-markdown>=1.9.0",
     "nodriver",
+    "opencv-python-headless>=4.12.0.88",
     "pymupdf>=1.26.4",
     "pytest>=8.4.1",
     "pytest-asyncio>=1.1.0",
@@ -30,7 +31,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = "src"
 markers = [
-    "suite: tests that check real world scenarios",
+    "integration: tests that check real world scenarios",
     "browser: tests that run a nodriver browser instance",
     "network: tests that require network access",
     "manager: tests that require the nodriver manager",

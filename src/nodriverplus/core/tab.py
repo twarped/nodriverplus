@@ -4,6 +4,10 @@ import json
 import nodriver
 import time
 import random
+import re
+import base64
+import os
+from pathlib import Path
 from datetime import timedelta, datetime, UTC
 from nodriver import cdp
 from urllib.parse import urlparse
@@ -16,12 +20,21 @@ from .scrape_response import (
     CrawlResultHandler, 
     FailedLink
 )
-from .pause_handlers import ScrapeRequestPausedHandler
+# from .pause_handlers import ScrapeRequestPausedHandler
 from .user_agent import UserAgent
 from . import cloudflare
 from .browser import get, get_with_timeout
 
 logger = logging.getLogger(__name__)
+
+
+# lazy cv2 + numpy import to keep import cost tiny when unused
+try:  # slim optional dep
+    import cv2  # type: ignore
+    import numpy as np  # type: ignore
+except Exception:  # noqa: broad ok here (missing dep)
+    cv2 = None  # type: ignore
+    np = None  # type: ignore
 
     
 async def wait_for_page_load(tab: nodriver.Tab, extra_wait_ms: int = 0):
@@ -30,22 +43,24 @@ async def wait_for_page_load(tab: nodriver.Tab, extra_wait_ms: int = 0):
     :param tab: target tab.
     :param extra_wait_ms: additional ms sleep via setTimeout after load.
     """
-    await tab.evaluate("""
-        new Promise(r => {
-            if (document.readyState === "complete") {
-                r();
-            } else {
-                window.addEventListener("load", r);
-            }
-        })
-    """, await_promise=True)
-    logger.debug("successfully finished loading %s", tab.url)
-    if extra_wait_ms:
-        logger.debug("waiting extra %d ms for %s", extra_wait_ms, tab.url)
-        await tab.evaluate(
-            f"new Promise(r => setTimeout(r, {extra_wait_ms}));",
-            await_promise=True
-        )
+    # minimal, event-driven wait: listen for CDP LoadEventFired and sleep
+    from nodriver import cdp as _cdp
+
+    loop = asyncio.get_running_loop()
+    ev = asyncio.Event()
+
+    def _handler(_event):
+        loop.call_soon_threadsafe(ev.set)
+
+    tab.add_handler([_cdp.page.LoadEventFired], handler=_handler)
+    try:
+        await ev.wait()
+        logger.info("successfully finished loading %s", getattr(tab, "url", "<unknown>"))
+        if extra_wait_ms:
+            logger.info("waiting extra %d ms for %s", extra_wait_ms, getattr(tab, "url", "<unknown>"))
+            await asyncio.sleep(extra_wait_ms / 1000)
+    finally:
+        tab.remove_handler([_cdp.page.LoadEventFired], handler=_handler)
 
 
 async def get_user_agent(tab: nodriver.Tab):
@@ -62,7 +77,7 @@ async def get_user_agent(tab: nodriver.Tab):
     user_agent = UserAgent.from_json(ua_data)
     logger.info("successfully retrieved user agent from %s", tab.url)
     logger.debug(
-        "user agent data retrieved from %s:\n%s", tab.url, ua_data
+        "user agent data retrieved from %s:\n%s", tab.url, json.dumps(ua_data, indent=2)
     )
     return user_agent
 
@@ -84,7 +99,7 @@ async def crawl(
     max_pages: int | None = None,
     collect_responses: bool = False,
     delay_range: tuple[float, float] | None = None,
-    request_paused_handler: ScrapeRequestPausedHandler = None,
+    # request_paused_handler: ScrapeRequestPausedHandler = None,
     proxy_server: str = None,
     proxy_bypass_list: list[str] = None,
     origins_with_universal_network_access: list[str] = None,
@@ -121,15 +136,16 @@ async def crawl(
     :param collect_responses: store every ScrapeResponse object.
     :param delay_range: (min,max) jitter before first scrape per worker loop.
     :param tab_close_timeout: seconds to wait closing a tab.
-    :param request_paused_handler: custom fetch interception handler.
-    **must be a type**—not an instance—so that it can be initiated later with the correct values attached
-    :type request_paused_handler: type[ScrapeRequestPausedHandler]
     :param proxy_server: (EXPERIMENTAL) (Optional) Proxy server, similar to the one passed to --proxy-server
     :param proxy_bypass_list: (EXPERIMENTAL) (Optional) Proxy bypass list, similar to the one passed to --proxy-bypass-list
     :param origins_with_universal_network_access: (EXPERIMENTAL) (Optional) An optional list of origins to grant unlimited cross-origin access to. Parts of the URL other than those constituting origin are ignored.
     :return: crawl summary
     :rtype: CrawlResult
     """
+    # :param request_paused_handler: custom fetch interception handler.
+    # **must be a type**—not an instance—so that it can be initiated later with the correct values attached
+    # :type request_paused_handler: type[ScrapeRequestPausedHandler]
+
     if scrape_response_handler is None:
         if not collect_responses:
             logger.warning("no `ScrapeResponseHandler` provided and collect_responses is False, only errors and links will be captured")
@@ -241,7 +257,7 @@ async def crawl(
                     page_load_timeout=page_load_timeout,
                     extra_wait_ms=extra_wait_ms,
                     new_tab=True,
-                    request_paused_handler=request_paused_handler,
+                    # request_paused_handler=request_paused_handler,
                     proxy_server=proxy_server,
                     proxy_bypass_list=proxy_bypass_list,
                     origins_with_universal_network_access=origins_with_universal_network_access,
@@ -373,7 +389,7 @@ async def scrape(
     # solve_cloudflare = True, # not implemented yet
     new_tab = False,
     new_window = False,
-    request_paused_handler = ScrapeRequestPausedHandler,
+    # request_paused_handler = ScrapeRequestPausedHandler,
     proxy_server: str = None,
     proxy_bypass_list: list[str] = None,
     origins_with_universal_network_access: list[str] = None,
@@ -386,12 +402,13 @@ async def scrape(
     if `scrape_response_handler` is provided, `scrape_response_handler.handle()` will
     be called and awaited before returning the final `ScrapeResponse`.
 
-    `scrape_response_handler` could be useful if you want to execute stuff on `tab`
-    after the page loads, but before the `RequestPausedHandler` is removed
-
     - **`proxy_server`** — (EXPERIMENTAL) (Optional) Proxy server, similar to the one passed to --proxy-server
     - **`proxy_bypass_list`** — (EXPERIMENTAL) (Optional) Proxy bypass list, similar to the one passed to --proxy-bypass-list
     - **`origins_with_universal_network_access`** — (EXPERIMENTAL) (Optional) An optional list of origins to grant unlimited cross-origin access to. Parts of the URL other than those constituting origin are ignored.
+
+    ### not implemented yet:
+    - `scrape_response_handler` could be useful if you want to execute stuff on `tab`
+    after the page loads, but before the `RequestPausedHandler` is removed
 
     :param base: reuse provided tab/browser root or create fresh.
     :param url: target url.
@@ -404,15 +421,16 @@ async def scrape(
     :param extra_wait_ms: post-load wait for dynamic content.
     :param new_tab: request new tab.
     :param new_window: request isolated window/context.
-    :param request_paused_handler: custom fetch interception handler.
-    **must be a type**—not an instance—so that it can be initiated later with the correct values attached
-    :type request_paused_handler: type[ScrapeRequestPausedHandler]
     :param proxy_server: (EXPERIMENTAL) (Optional) Proxy server, similar to the one passed to --proxy-server
     :param proxy_bypass_list: (EXPERIMENTAL) (Optional) Proxy bypass list, similar to the one passed to --proxy-bypass-list
     :param origins_with_universal_network_access: (EXPERIMENTAL) (Optional) An optional list of origins to grant unlimited cross-origin access to. Parts of the URL other than those constituting origin are ignored.
     :return: html/links/bytes/metadata
     :rtype: ScrapeResponse
     """
+    # :param request_paused_handler: custom fetch interception handler.
+    # **must be a type**—not an instance—so that it can be initiated later with the correct values attached
+    # :type request_paused_handler: type[ScrapeRequestPausedHandler]
+
     
     start = time.monotonic()
     url = fix_url(url)
@@ -440,11 +458,19 @@ async def scrape(
         )
     )
 
-    # use the stock handler unless a custom one is provided
-    request_paused_handler = (request_paused_handler or ScrapeRequestPausedHandler)(
-        tab, scrape_response, url, scrape_bytes
-    )
-    await request_paused_handler.start()
+    # TODO: figure out why request interception 
+    # causes this error with sandboxed iframes:
+    # my current theory is that intercepting the main page's URL
+    # changes the pages origin or something weird like that.
+    #
+    # Blocked script execution in 'about:blank' because the document's
+    # frame is sandboxed and the 'allow-scripts' permission is not set.
+
+    # # use the stock handler unless a custom one is provided
+    # request_paused_handler = (request_paused_handler or ScrapeRequestPausedHandler)(
+    #     tab, scrape_response, url, scrape_bytes
+    # )
+    # await request_paused_handler.start()
 
     try:
         nav_response = await get_with_timeout(
@@ -484,6 +510,133 @@ async def scrape(
                 await scrape_response_handler.handle(scrape_response)
             except Exception:
                 logger.exception("error running scrape_response_handler for %s", url)
-        await request_paused_handler.stop()
+        # await request_paused_handler.stop()
 
     return scrape_response
+
+
+async def click_template_image(
+    tab: nodriver.Tab,
+    template: str | os.PathLike,
+    *,
+    x_shift: int = 0,
+    y_shift: int = 0,
+    flash_point: bool = False,
+    save_annotated_screenshot: str | os.PathLike = None,
+    match_threshold: float = 0.5,
+):
+    """find a template in the current page screenshot and somewhere around it
+    (`x_shift` and `y_shift`).
+
+    if the template filename follows this pattern:
+    - `{name}__x{-?\d+}__y{-?\d+}`, 
+    
+    then the embedded shifts will be applied unless 
+    `x_shift` or `y_shift` are explicitly set to non-zero values.
+
+    :param tab: target nodriver Tab.
+    :param template: path or filename of the template image.
+    :param x_shift: horizontal shift in css pixels to apply to the computed click point.
+    :param y_shift: vertical shift in css pixels to apply to the computed click point.
+    :param save_annotated_screenshot: if set, save an annotated screenshot with the matched template.
+    :param flash_point: if True, flash the click location after clicking.
+    :param match_threshold: only issue a click if the template match exceeds this threshold (0.0-1.0).
+    """
+
+    # resolve template path
+    tpl_path = Path(template)
+
+    # parse embedded shift hints unless explicitly overridden by params
+    # pattern: {name}__  (both optional)
+    x_group = re.match(r".*__x(-?\d+).*", tpl_path.name)
+    y_group = re.match(r".*__y(-?\d+).*", tpl_path.name)
+    if x_group:
+        if x_shift == 0:
+            x_shift = int(x_group.group(1))
+    if y_group:
+        if y_shift == 0:
+            y_shift = int(y_group.group(1))
+
+    # capture screenshot + dpr
+    png_bytes = None
+    dpr = float(await tab.evaluate("window.devicePixelRatio||1"))
+    await tab.send(cdp.page.enable())
+    data = await tab.send(cdp.page.capture_screenshot(format_="png", from_surface=True))
+    png_bytes = base64.b64decode(data)
+
+    scr = cv2.imdecode(np.frombuffer(png_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+    template_im = cv2.imread(str(tpl_path))
+    match = cv2.matchTemplate(scr, template_im, cv2.TM_CCOEFF_NORMED)
+    _min_v, _max_v, _min_l, max_l = cv2.minMaxLoc(match)
+    # matchTemplate returns a normalized score in _max_v; convert to percentage for logging
+    match_pct = float(_max_v) * 100.0
+    xs, ys = max_l
+    th, tw = template_im.shape[:2]
+    xe, ye = xs + tw, ys + th
+    cx_img = (xs + xe) // 2
+    cy_img = (ys + ye) // 2
+    # apply shifts (shift already in image pixel space; adjust for dpr afterwards)
+    cx_shifted = cx_img + int(x_shift * dpr)
+    cy_shifted = cy_img + int(y_shift * dpr)
+    h, w = scr.shape[:2]
+    cx_shifted = max(0, min(cx_shifted, w - 1))
+    cy_shifted = max(0, min(cy_shifted, h - 1))
+    # optionally annotate and save an annotated screenshot before clicking
+    if save_annotated_screenshot:
+        # draw a bright red rectangle around the matched template and a bright green dot at click
+        # scr is a BGR image
+        rect_thickness = max(2, int(round(3 * (dpr or 1.0))))
+        dot_radius = max(3, int(round(4 * (dpr or 1.0))))
+        # rectangle: top-left (xs,ys), bottom-right (xe,ye)
+        cv2.rectangle(scr, (int(xs), int(ys)), (int(xe), int(ye)), (0, 0, 255), thickness=rect_thickness)
+        # dot: filled circle at clicked image coords
+        cv2.circle(scr, (int(cx_shifted), int(cy_shifted)), dot_radius, (0, 255, 0), thickness=-1)
+        out_path = Path(save_annotated_screenshot)
+        # ensure parent dir exists
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        # write annotated image
+        cv2.imwrite(str(out_path), scr)
+
+    if match_pct / 100.0 < match_threshold:
+        logger.warning(
+            "skipping template %s: match=%.1f%% img=(%d,%d) css=(%.1f,%.1f) dpr=%.2f shift=(%d,%d)",
+            tpl_path.name,
+            match_pct,
+            cx_shifted,
+            cy_shifted,
+            cx_shifted / (dpr or 1.0),
+            cy_shifted / (dpr or 1.0),
+            dpr,
+            x_shift,
+            y_shift,
+        )
+        return False
+
+    # convert to css coords
+    css_x = cx_shifted / (dpr or 1.0)
+    css_y = cy_shifted / (dpr or 1.0)
+    await tab.mouse_click(css_x, css_y)
+    logger.info(
+        "successfully clicked best match coords for %s: match=%.1f%% img=(%d,%d) css=(%.1f,%.1f) dpr=%.2f shift=(%d,%d)",
+        tpl_path.name,
+        match_pct,
+        cx_shifted,
+        cy_shifted,
+        css_x,
+        css_y,
+        dpr,
+        x_shift,
+        y_shift,
+    )
+    if flash_point:
+        await tab.flash_point(int(css_x), int(css_y))
+    return True
+
+
+__all__ = [
+    "wait_for_page_load",
+    "get_user_agent",
+    "crawl",
+    "scrape",
+    "click_template_image",
+]

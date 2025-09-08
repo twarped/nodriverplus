@@ -1,7 +1,7 @@
 import logging
 import nodriver
 from nodriver import cdp
-from ..targets import TargetInterceptor
+from ..target_intercepted import TargetInterceptor
 from ...cdp_helpers import can_use_domain
 
 logger = logging.getLogger(__name__)

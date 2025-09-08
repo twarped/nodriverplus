@@ -19,11 +19,12 @@ from .scrape_response import *
 from .tab import get, get_user_agent, scrape, crawl, get_with_timeout
 from .browser import get, stop
 from .manager import Manager
-from .pause_handlers import TargetInterceptor, TargetInterceptorManager
-from .pause_handlers.stock import (
+from .handlers import TargetInterceptor, TargetInterceptorManager
+from .handlers.stock import (
     UserAgentPatch, 
     patch_user_agent,
-    ScrapeRequestPausedHandler,
+    # not working as intended currently
+    # ScrapeRequestPausedHandler,
     WindowSizePatch,
     patch_window_size,
 )
@@ -196,7 +197,7 @@ class NodriverPlus:
         max_pages: int | None = None,
         collect_responses: bool = False,
         delay_range: tuple[float, float] | None = None,
-        request_paused_handler: ScrapeRequestPausedHandler = None,
+        # request_paused_handler: ScrapeRequestPausedHandler = None,
     ):
         """customizable crawl API starting at `url` up to `depth`.
 
@@ -225,12 +226,13 @@ class NodriverPlus:
         :param collect_responses: store every ScrapeResponse object.
         :param delay_range: (min,max) jitter before first scrape per worker loop.
         :param tab_close_timeout: seconds to wait closing a tab.
-        :param request_paused_handler: custom fetch interception handler.
-        **must be a type**—not an instance—so that it can be initiated later with the correct values attached
-        :type request_paused_handler: type[ScrapeRequestPausedHandler]
         :return: crawl summary
         :rtype: CrawlResult
         """
+        # :param request_paused_handler: custom fetch interception handler.
+        # **must be a type**—not an instance—so that it can be initiated later with the correct values attached
+        # :type request_paused_handler: type[ScrapeRequestPausedHandler]
+
         return await crawl(
             self.browser,
             url=url,
@@ -247,12 +249,10 @@ class NodriverPlus:
             max_pages=max_pages,
             collect_responses=collect_responses,
             delay_range=delay_range,
-            request_paused_handler=request_paused_handler,
+            # request_paused_handler=request_paused_handler,
         )
 
 
-    # TODO: refactor NodriverPlus to pull from 
-    # dedicated `Tab` functions like this
     async def scrape(self, 
         url: str,
         scrape_bytes = True,
@@ -265,7 +265,7 @@ class NodriverPlus:
         # solve_cloudflare = True, # not implemented yet
         new_tab = False,
         new_window = False,
-        request_paused_handler = ScrapeRequestPausedHandler,
+        # request_paused_handler = ScrapeRequestPausedHandler,
         proxy_server: str = None,
         proxy_bypass_list: list[str] = None,
         origins_with_universal_network_access: list[str] = None,
@@ -278,12 +278,13 @@ class NodriverPlus:
         if `scrape_response_handler` is provided, `scrape_response_handler.handle()` will
         be called and awaited before returning the final `ScrapeResponse`.
 
-        `scrape_response_handler` could be useful if you want to execute stuff on `tab`
-        after the page loads, but before the `RequestPausedHandler` is removed
-
         - **`proxy_server`** — (EXPERIMENTAL) (Optional) Proxy server, similar to the one passed to --proxy-server
         - **`proxy_bypass_list`** — (EXPERIMENTAL) (Optional) Proxy bypass list, similar to the one passed to --proxy-bypass-list
         - **`origins_with_universal_network_access`** — (EXPERIMENTAL) (Optional) An optional list of origins to grant unlimited cross-origin access to. Parts of the URL other than those constituting origin are ignored.
+
+        ### not implemented yet:
+        - `scrape_response_handler` could be useful if you want to execute stuff on `tab`
+        after the page loads, but before the `RequestPausedHandler` is removed
 
         :param url: target url.
         :param scrape_bytes: capture non-text body bytes.
@@ -296,15 +297,15 @@ class NodriverPlus:
         :param extra_wait_ms: post-load wait for dynamic content.
         :param new_tab: request new tab.
         :param new_window: request isolated window/context.
-        :param request_paused_handler: custom fetch interception handler.
-        **must be a type**—not an instance—so that it can be initiated later with the correct values attached
-        :type request_paused_handler: type[ScrapeRequestPausedHandler]
         :param proxy_server: (EXPERIMENTAL) (Optional) Proxy server, similar to the one passed to --proxy-server
         :param proxy_bypass_list: (EXPERIMENTAL) (Optional) Proxy bypass list, similar to the one passed to --proxy-bypass-list
         :param origins_with_universal_network_access: (EXPERIMENTAL) (Optional) An optional list of origins to grant unlimited cross-origin access to. Parts of the URL other than those constituting origin are ignored.
         :return: html/links/bytes/metadata
         :rtype: ScrapeResponse
         """
+        # :param request_paused_handler: custom fetch interception handler.
+        # **must be a type**—not an instance—so that it can be initiated later with the correct values attached
+        # :type request_paused_handler: type[ScrapeRequestPausedHandler]
         
         return await scrape(
             base=self.browser,
@@ -317,7 +318,7 @@ class NodriverPlus:
             extra_wait_ms=extra_wait_ms,
             new_tab=new_tab,
             new_window=new_window,
-            request_paused_handler=request_paused_handler,
+            # request_paused_handler=request_paused_handler,
             proxy_server=proxy_server,
             proxy_bypass_list=proxy_bypass_list,
             origins_with_universal_network_access=origins_with_universal_network_access

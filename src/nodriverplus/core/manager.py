@@ -6,7 +6,7 @@ from typing import Callable
 
 import nodriver
 
-from .pause_handlers import ScrapeRequestPausedHandler
+# from .pause_handlers import ScrapeRequestPausedHandler
 from .scrape_response import ScrapeResponseHandler, CrawlResultHandler
 from .tab import crawl, scrape
 
@@ -72,7 +72,7 @@ class Manager:
         max_pages: int | None = None,
         collect_responses: bool = False,
         delay_range: tuple[float, float] | None = None,
-        request_paused_handler: ScrapeRequestPausedHandler = None,
+        # request_paused_handler: ScrapeRequestPausedHandler = None,
         proxy_server: str = None,
         proxy_bypass_list: list[str] = None,
         origins_with_universal_network_access: list[str] = None,
@@ -97,7 +97,7 @@ class Manager:
                 "max_pages": max_pages,
                 "collect_responses": collect_responses,
                 "delay_range": delay_range,
-                "request_paused_handler": request_paused_handler,
+                # "request_paused_handler": request_paused_handler,
                 "proxy_server": proxy_server,
                 "proxy_bypass_list": proxy_bypass_list,
                 "origins_with_universal_network_access": origins_with_universal_network_access,
@@ -116,7 +116,7 @@ class Manager:
         extra_wait_ms = 0,
         new_tab = False,
         new_window = False,
-        request_paused_handler = ScrapeRequestPausedHandler,
+        # request_paused_handler = ScrapeRequestPausedHandler,
         proxy_server: str = None,
         proxy_bypass_list: list[str] = None,
         origins_with_universal_network_access: list[str] = None,
@@ -136,7 +136,7 @@ class Manager:
                 "extra_wait_ms": extra_wait_ms,
                 "new_tab": new_tab,
                 "new_window": new_window,
-                "request_paused_handler": request_paused_handler,
+                # "request_paused_handler": request_paused_handler,
                 "proxy_server": proxy_server,
                 "proxy_bypass_list": proxy_bypass_list,
                 "origins_with_universal_network_access": origins_with_universal_network_access,

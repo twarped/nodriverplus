@@ -17,19 +17,6 @@
         return fn;
     }
 
-    // --- 2) Define helpers ---
-    function defineData(obj, prop, value, { enumerable = false, writable = false } = {}) {
-        Object.defineProperty(obj, prop, { value, enumerable, writable, configurable: true });
-    }
-
-    function defineMethod(obj, prop, fn, { enumerable = false } = {}) {
-        defineData(obj, prop, maskNative(fn, `function ${prop}() { [native code] }`), { enumerable });
-    }
-
-    function defineIterator(obj, generatorFn, name = "values") {
-        defineData(obj, Symbol.iterator, maskNative(generatorFn, `function ${name}() { [native code] }`));
-    }
-
     function defineNativeGetter(obj, prop, val, { enumerable = false } = {}) {
         const getter = function () { return val; };
         Object.defineProperty(obj, prop, {
@@ -89,5 +76,5 @@
     defineNativeGetter(navProto, "platform", uaPatch.platform);
 
     defineNativeGetter(navProto, "language", uaPatch.acceptLanguage);
-    defineNativeGetter(navProto, "languages", [uaPatch.acceptLanguage]);
+    defineNativeGetter(navProto, "languages", [...uaPatch.acceptLanguage.split(",")]);
 })();

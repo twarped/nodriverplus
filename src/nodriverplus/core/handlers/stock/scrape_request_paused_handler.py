@@ -1,7 +1,14 @@
+"""
+# TODO:
+
+figure out why intercepting the original request triggers cloudflare
+and prevents you from receiving a `cf_clearance` token.
+"""
+
 import logging
 import nodriver
 
-from ..requests import RequestPausedHandler
+from ..request_paused import RequestPausedHandler
 from ...scrape_response import ScrapeResponse, ScrapeResponseIntercepted, ScrapeRequestIntercepted
 import base64
 
