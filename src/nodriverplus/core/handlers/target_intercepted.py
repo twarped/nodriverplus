@@ -33,6 +33,19 @@ class NetworkWatcher:
         """
         pass
 
+    async def on_loading_failed(self,
+        tab: Tab,
+        ev: cdp.network.LoadingFailed,
+        request_will_be_sent: cdp.network.RequestWillBeSent,
+    ):
+        """
+        handle a `LoadingFailed` event
+
+        :param tab: the `Tab` the event was received on.
+        :param ev: the `LoadingFailed` event.
+        """
+        pass
+
     async def on_request(self,
         tab: Tab,
         ev: cdp.network.RequestWillBeSent,
@@ -109,10 +122,9 @@ class TargetInterceptorManager:
         self.connection = session.connection if isinstance(session, Browser) else session
         self.interceptors = interceptors
         self.response_received_handlers = response_received_handlers
-        self.already_received_responses = set()
-        self.already_sent_requests = set()
-        self.requests_to_tab: dict[str, Tab] = {}
-        self.responses_to_tab: dict[str, Tab] = {}
+        self.request_ids_to_tab: dict[str, Tab] = {}
+        self.request_sent_events: dict[str, cdp.network.RequestWillBeSent] = {}
+        self.response_received_events: dict[str, cdp.network.ResponseReceived] = {}
         self.responses_extra_info: dict[str, cdp.network.ResponseReceivedExtraInfo] = {}
         self.requests_extra_info: dict[str, cdp.network.RequestWillBeSentExtraInfo] = {}
         self.target_id_to_connection: dict[str, Tab | Connection] = {}
@@ -178,7 +190,18 @@ class TargetInterceptorManager:
             await handler.on_response(tab, ev, self.responses_extra_info.get(ev.request_id))
         self.responses_extra_info.pop(ev.request_id, None)
 
-    
+
+    async def on_loading_failed(self, ev: cdp.network.LoadingFailed):
+        tab = self.request_ids_to_tab.get(ev.request_id)
+        if tab is None:
+            logger.info("no tab found for LoadingFailed with request_id %s", ev.request_id)
+            return
+
+        for handler in self.response_received_handlers:
+            await handler.on_loading_failed(tab, ev, self.request_sent_events.get(ev.request_id))
+        self.request_ids_to_tab.pop(ev.request_id, None)
+
+
     async def on_response_received_extra_info(self, ev: cdp.network.ResponseReceivedExtraInfo):
         self.responses_extra_info[ev.request_id] = ev
         for handler in self.response_received_handlers:
@@ -190,6 +213,9 @@ class TargetInterceptorManager:
         if tab is None:
             logger.debug("no tab found for RequestWillBeSent <%s> with target_id %s", ev.request.url, ev.frame_id)
             return
+        self.request_ids_to_tab[ev.request_id] = tab
+        # store the request event so LoadingFailed handlers can access original url
+        self.request_sent_events[ev.request_id] = ev
         for handler in self.response_received_handlers:
             await handler.on_request(tab, ev, self.requests_extra_info.get(ev.request_id))
         self.requests_extra_info.pop(ev.request_id, None)
@@ -326,6 +352,7 @@ class TargetInterceptorManager:
         connection.add_handler(cdp.network.ResponseReceivedExtraInfo,
             self.on_response_received_extra_info
         )
+        connection.add_handler(cdp.network.LoadingFailed, self.on_loading_failed)
         connection.add_handler(cdp.network.RequestWillBeSent, 
             self.on_request_will_be_sent
         )
