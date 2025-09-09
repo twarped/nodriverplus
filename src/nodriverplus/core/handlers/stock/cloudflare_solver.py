@@ -7,7 +7,6 @@ import http.server
 import socketserver
 import threading
 import nodriver
-from datetime import datetime, UTC
 from nodriver import cdp
 from ..target_intercepted import NetworkWatcher
 from ...tab import click_template_image
@@ -28,7 +27,7 @@ class HangingHandler(http.server.BaseHTTPRequestHandler):
                     self.send_response(200)
                     self.end_headers()
                     self.wfile.write(b"OK")
-                    logger.info("successfully released hanging request for %s (no gate)", self.path)
+                    logging.info("immediately released hanging request for %s", self.path)
                 except BrokenPipeError:
                     logger.info("client closed connection before immediate release for %s", self.path)
                 return
@@ -40,14 +39,14 @@ class HangingHandler(http.server.BaseHTTPRequestHandler):
             self.server.active_requests.append((self, event, self.path))
 
         # block here until release_block sets the event
-        logger.info("waiting for gate to release on: %s", self.path)
+        print("waiting for gate to release on:", self.path)
         event.wait()
         # once released, send a simple OK response and exit
         try:
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"OK")
-            logger.info("successfully released hanging request for %s", self.path)
+            logger.info("released hanging request for %s", self.path)
         except BrokenPipeError:
             # client already closed connection - nothing to do
             logger.info("client closed connection before release for %s", self.path)
@@ -72,23 +71,25 @@ class HangingServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
     def release_block(self, path: str):
         # try to find an active waiting handler first
+        print("getting lock to release", path)
         with self._lock:
+            print("lock set, searching for active request")
             for handler, event, p in list(self.active_requests):
                 if p == path:
+                    print("found active request for", path, "; setting event...")
                     # signal the handler to write the response and exit
-                    logger.info("successfully found active hanging request for %s; setting...", path)
                     event.set()
-                    logger.info("successfully set event to release hanging request for %s", path)
+                    print("event set for", path, "; removing from active requests...")
                     self.active_requests.remove((handler, event, p))
-                    logger.info("successfully removed hanging request from active requests for %s", path)
+                    logger.info("hanging request found and set for %s", path)
                     return True
 
             # no active handler found; record that this path has been released
             if path not in self.released_paths:
                 self.released_paths.add(path)
-                logger.info("pre-released hanging request for %s", path)
+                logger.info("pre-released hanging path %s (no active request yet)", path)
             else:
-                logger.info("no active hanging request found for %s; pre-released", path)
+                logger.info("release called for already pre-released path %s", path)
             return False
 
 class CloudflareSolver(NetworkWatcher):
@@ -111,69 +112,71 @@ class CloudflareSolver(NetworkWatcher):
         ev: cdp.network.ResponseReceived, 
         tab: nodriver.Tab,
     ):
-        start = datetime.now(UTC)
-
-        logger.info("cloudflare challenge detected on %s; solving...", ev.response.url)
+        logger.info("cloudflare detected on %s", ev.response.url)
         tab._has_cf_clearance = False
 
-        dark = True
         while tab._has_cf_clearance is False:
             # try both light and dark template images
-            await click_template_image(
-                tab,
-                "cloudflare_dark__x-120__y0.png" if dark else "cloudflare_light__x-120__y0.png",
-                flash_point=True,
-                save_annotated_screenshot=self.save_annotated_screenshot,
-            )
-            dark = not dark
-            await asyncio.sleep(0.5)
-        
-        elapsed = (datetime.now(UTC) - start).total_seconds()
-        logger.info("solved challenge in %s seconds", elapsed)
-        
+            for template in [
+                "cloudflare_light__x-120__y0.png",
+                "cloudflare_dark__x-120__y0.png",
+            ]:
+                await click_template_image(
+                    tab,
+                    template,
+                    flash_point=True,
+                    save_annotated_screenshot=self.save_annotated_screenshot,
+                )
+                await asyncio.sleep(0.5)
 
     async def on_clearance(self,
         ev: cdp.network.ResponseReceived, 
         tab: nodriver.Tab,
     ):
+        logger.info("cloudflare clearance detected on %s", ev.response.url)
         await tab.reload(ignore_cache=False)
         tab._has_cf_clearance = True
+        logger.info("successfully reload and set _has_cf_clearance on %s", tab.url)
 
     async def on_request(self, tab, ev, extra_info):
-        logger.info("request received: %s <%s>", ev.request_id, ev.request.url)
-        # release gate if `request_id` is present in any target's gates.
-        # necessary for redirects which will overwrite a gates `request_id`
-        # with a new one without releasing the original gate
-        for target_id, gates in list(self.gates.items()):
-            if ev.request_id in gates:
-                path = gates[ev.request_id]
-                logger.info("releasing gate for %s redirect on %s", path, ev.request_id)
-                self.server.release_block(path)
-                gates.pop(ev.request_id, None)
-                break
         domain = f"{self.server.server_address[0]}:{self.server.server_address[1]}"
-        # blobs don't have responses registerable by CDP, so ignore the requests.
         if re.match(rf"^(blob:|http://{domain}/[\w]{{32}})", ev.request.url):
-            logger.info("ignoring blob or internal gate request: %s", ev.request.url)
+            print("ignoring hanging server request", ev.request.url)
             return
+        
+        print("request id: ", ev.request_id, f"<{ev.request.url}>")
+        headers = ev.request.headers.to_json()
+        if extra_info:
+            headers = extra_info.headers.to_json()
+        print("headers for request id: ", ev.request_id, f"\n{json.dumps(headers, indent=2)}")
+        current_gates = self.gates.get(tab.target_id, {})
+        if current_gates.get(ev.request_id):
+            print("redirect detected. releasing gate to allow a new one")
+            self.server.release_block(current_gates[ev.request_id])
+            self.gates[tab.target_id].pop(ev.request_id, None)
+            print("successfully released gate for redirect", ev.request_id)
 
         unique_path = f"/{os.urandom(16).hex()}"
         target_id = tab.target_id
         if target_id not in self.gates:
             self.gates[target_id] = {}
         self.gates[target_id][ev.request_id] = unique_path
+        print(json.dumps(self.gates[target_id], indent=2))
         unique_url = f"http://{domain}{unique_path}"
-        logger.info("creating gate url %s for %s (origin %s)", unique_url, ev.request_id, ev.request.url)
+        logger.info("creating gate url %s for %s (origin %s)", ev.request_id, unique_url, ev.request.url)
 
         await tab.evaluate(f"new Image().src = '{unique_url}';")
 
     async def on_response(self, tab, ev, extra_info):
-        # blobs don't have responses, but just in case
         if re.match(rf"^(blob:|http://{self.server.server_address[0]}:{self.server.server_address[1]}/[\w]{{32}})", ev.response.url):
+            print("ignoring hanging server response", ev.response.url)
             return
+        
+        print("response id: ", ev.request_id, f"<{ev.response.url}>")
         headers = ev.response.headers.to_json()
         if extra_info:
             headers = extra_info.headers.to_json()
+        print(json.dumps(headers, indent=2))
 
         cf_chl_gen = headers.get("cf-chl-gen")
         set_cookie = headers.get("set-cookie", "")
@@ -184,19 +187,16 @@ class CloudflareSolver(NetworkWatcher):
             await self.on_clearance(ev, tab)
             
             gates = self.gates[tab.target_id].copy()
-            logger.info("releasing gates for %s after clearance", tab)
             for request_id, path in gates.items():
+                print("releasing gate", path, f"<{request_id}>")
                 self.server.release_block(path)
                 self.gates[tab.target_id].pop(request_id, None)
+            print("cleared all gates for target ", tab.target_id)
+            print("current gates after clearance:", json.dumps(self.gates, indent=2))
         else:
-            gate = self.gates.get(tab.target_id, None)
-            if not gate:
-                logger.info("gates not initiated for %s yet", tab)
-                return
-            path = gate[ev.request_id]
-            if not path:
-                logger.info("no gate path found for %s on %s (no challenge header)", ev.request_id, tab)
-                return
-            logger.info("releasing gate for %s on %s (no challenge header)", path, ev.request_id)
+            print(json.dumps(self.gates, indent=2))
+            path = self.gates[tab.target_id][ev.request_id]
+            print("releasing gate for response", ev.request_id, f"<{path}>")
             self.server.release_block(path)
+            print("successfully released gate for response", ev.request_id, f"<{path}>")
             self.gates[tab.target_id].pop(ev.request_id, None)
