@@ -195,7 +195,11 @@ class CloudflareSolver(NetworkWatcher):
             print("current gates after clearance:", json.dumps(self.gates, indent=2))
         else:
             print(json.dumps(self.gates, indent=2))
-            path = self.gates[tab.target_id][ev.request_id]
+            try:
+                path = self.gates[tab.target_id][ev.request_id]
+            except KeyError:
+                print("no gate found for response", ev.request_id, f"<{ev.response.url}>")
+                return
             print("releasing gate for response", ev.request_id, f"<{path}>")
             self.server.release_block(path)
             print("successfully released gate for response", ev.request_id, f"<{path}>")
