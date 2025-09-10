@@ -27,9 +27,10 @@ from .handlers.stock import (
     # ScrapeRequestPausedHandler,
     WindowSizePatch,
     patch_window_size,
+    CloudflareSolver,
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("nodriverplus.NodriverPlus")
 
 
 class NodriverPlus:
@@ -51,6 +52,7 @@ class NodriverPlus:
     def __init__(self, 
         user_agent: UserAgent = None, 
         hide_headless: bool = True, 
+        solve_cloudflare: bool = True,
         interceptors: list[TargetInterceptor] = None,
         manager_concurrency: int = 1,
     ):
@@ -66,10 +68,11 @@ class NodriverPlus:
         self.user_agent = user_agent
         self.hide_headless = hide_headless
         # init interceptor manager and add provided + stock interceptors
-        interceptor_manager = TargetInterceptorManager()
-        interceptor_manager.interceptors.extend(interceptors or [])
+        interceptor_manager = TargetInterceptorManager(interceptors)
         if user_agent:
             interceptor_manager.interceptors.append(UserAgentPatch(user_agent, hide_headless))
+        if solve_cloudflare:
+            interceptor_manager.interceptors.append(CloudflareSolver())
         self.interceptor_manager = interceptor_manager
         # dedicated queue manager (jobs provide their own per-job crawl/scrape concurrency)
         self.manager = Manager(concurrency=manager_concurrency)
@@ -184,7 +187,7 @@ class NodriverPlus:
     async def crawl(self,
         url: str,
         scrape_response_handler: ScrapeResponseHandler = None,
-        depth = 1,
+        depth: int | None = 1,
         crawl_result_handler: CrawlResultHandler = None,
         *,
         new_window = False,
@@ -262,7 +265,6 @@ class NodriverPlus:
         wait_for_page_load = True,
         page_load_timeout = 60,
         extra_wait_ms = 0,
-        # solve_cloudflare = True, # not implemented yet
         new_tab = False,
         new_window = False,
         # request_paused_handler = ScrapeRequestPausedHandler,

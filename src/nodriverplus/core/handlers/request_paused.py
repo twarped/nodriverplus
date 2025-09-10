@@ -29,7 +29,7 @@ from dataclasses import dataclass, field, asdict
 import nodriver
 from nodriver import cdp
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("nodriverplus.RequestPausedHandler")
 
 
 @dataclass

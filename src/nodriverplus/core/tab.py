@@ -25,7 +25,7 @@ from .user_agent import UserAgent
 from . import cloudflare
 from .browser import get, get_with_timeout
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("nodriverplus.tab")
 
 
 # lazy cv2 + numpy import to keep import cost tiny when unused
@@ -43,8 +43,10 @@ async def wait_for_page_load(tab: nodriver.Tab, extra_wait_ms: int = 0):
     :param tab: target tab.
     :param extra_wait_ms: additional ms sleep via setTimeout after load.
     """
-    # minimal, event-driven wait: listen for CDP LoadEventFired and sleep
-    from nodriver import cdp as _cdp
+    
+    # if the document is already fully loaded, return immediately (about:blank)
+    if await tab.evaluate("document.readyState") == "complete":
+        return
 
     loop = asyncio.get_running_loop()
     ev = asyncio.Event()
@@ -52,7 +54,7 @@ async def wait_for_page_load(tab: nodriver.Tab, extra_wait_ms: int = 0):
     def _handler(_event):
         loop.call_soon_threadsafe(ev.set)
 
-    tab.add_handler([_cdp.page.LoadEventFired], handler=_handler)
+    tab.add_handler([cdp.page.LoadEventFired], handler=_handler)
     try:
         await ev.wait()
         logger.info("successfully finished loading %s", getattr(tab, "url", "<unknown>"))
@@ -60,7 +62,7 @@ async def wait_for_page_load(tab: nodriver.Tab, extra_wait_ms: int = 0):
             logger.info("waiting extra %d ms for %s", extra_wait_ms, getattr(tab, "url", "<unknown>"))
             await asyncio.sleep(extra_wait_ms / 1000)
     finally:
-        tab.remove_handler([_cdp.page.LoadEventFired], handler=_handler)
+        tab.remove_handler([cdp.page.LoadEventFired], handler=_handler)
 
 
 async def get_user_agent(tab: nodriver.Tab):
@@ -86,7 +88,7 @@ async def crawl(
     base: nodriver.Tab | nodriver.Browser,
     url: str,
     scrape_response_handler: ScrapeResponseHandler = None,
-    depth = 1,
+    depth: int | None = 1,
     crawl_result_handler: CrawlResultHandler = None,
     *,
     new_window = False,
@@ -161,19 +163,20 @@ async def crawl(
         if a < 0 or b < 0:
             delay_range = None  # disallow negative
     logger.info(
-        "crawl started for %s (depth=%d concurrency=%d max_pages=%s delay=%s)",
+        "crawl started for %s (depth=%s concurrency=%s max_pages=%s delay=%s)",
         url, depth, concurrency, max_pages, delay_range,
     )
 
     root_url = fix_url(url)
-    depth = max(0, depth)
+    if depth is not None:
+        depth = max(0, depth)
     concurrency = max(1, concurrency)
 
     time_start = datetime.now(UTC)
 
-    # queue: (url, remaining_depth)
+    # queue: (url, current_depth) where root starts at 0
     queue: asyncio.Queue[tuple[str, int]] = asyncio.Queue()
-    await queue.put((root_url, depth))
+    await queue.put((root_url, 0))
 
     # visited = fully processed
     # all_links_set = discovered (even if not yet processed)
@@ -181,6 +184,7 @@ async def crawl(
     all_links: list[str] = [root_url]
     all_links_set: set[str] = {root_url}
     successful_links: list[str] = []
+    processed_final_urls: set[str] = set()
     failed_links: list[FailedLink] = []
     timed_out_links: list[FailedLink] = []
     # optional heavy list of every response captured
@@ -191,10 +195,9 @@ async def crawl(
     # map worker idx -> current url for runtime debugging
     current_processing: dict[int, str] = {}
 
-    async def should_enqueue(link: str, remaining: int) -> bool:
-        # depth 0 should just be a single scrape
-        if remaining < 0:
-            return False
+    async def should_enqueue(link: str) -> bool:
+        # canonicalize and de-duplicate discovered links; depth checks are handled
+        # by the caller so this function only verifies URL shape and duplication.
         try:
             link_canon = fix_url(link)
         except Exception:
@@ -214,13 +217,18 @@ async def crawl(
     if new_window:
         # create a dedicated browser context + window; tabs we spawn will stay in this context
         instance = await get(base, new_window=True, new_context=True)
+    else:
+        instance = base
+
+    # collect tab close tasks so we can await them before returning
+    closing_tasks: list[asyncio.Task] = []
 
     async def worker(idx: int):
         nonlocal pages_processed
         while True:
             try:
                 # wait for next target
-                current_url, remaining_depth = await queue.get()
+                current_url, current_depth = await queue.get()
             except asyncio.CancelledError:
                 break
             # register current work for debugging/monitoring
@@ -241,7 +249,8 @@ async def crawl(
             error_obj: Exception | None = None
             scrape_response: ScrapeResponse | None = None
             try:
-                is_first_depth = remaining_depth + 1 == depth
+                # first scrape (root) is at depth 0
+                is_first_depth = current_depth == 0
                 # simple delay / jitter if specified; skip if first scrape
                 if delay_range is not None and is_first_depth:
                     wait_time = random.uniform(*delay_range)
@@ -263,56 +272,53 @@ async def crawl(
                     origins_with_universal_network_access=origins_with_universal_network_access,
                 )
                 pages_processed += 1
-                links: list[str] = []
-                try:
-                    # remember: the handler can mutate links
-                    links = await scrape_response_handler.handle(scrape_response) or []
-                except Exception as e:
-                    error_obj = e
-                    logger.exception("failed running handler for %s:", current_url)
-                finally:
-                    if scrape_response.tab:
-                        # avoid closing tabs twice
-                        if not (new_window and scrape_response.tab is instance):
-                            # run close in its own task so a hung 
-                            # protocol `Transaction` can't block join()
-                            t = asyncio.create_task(scrape_response.tab.close())
-                            t.add_done_callback(lambda f: logger.info("tab closed: %s", f.result()))
+                # determine final canonical URL (after redirects)
+                final_url = getattr(scrape_response, "url", None) or (scrape_response.tab.url if scrape_response.tab else current_url)
+                final_url = fix_url(final_url)
 
-                # scrape timed out or failed
+                links: list[str] = []
                 if scrape_response.timed_out_navigating:
                     timed_out_links.append(FailedLink(current_url, scrape_response.timed_out_navigating, error_obj))
-                elif error_obj:
-                    failed_links.append(FailedLink(current_url, scrape_response.timed_out_navigating, error_obj))
                 else:
-                    # scrape was a success
-                    # record the final URL if the page redirected
-                    final_url = getattr(scrape_response, "url", None) or (scrape_response.tab.url if scrape_response.tab else current_url)
-                    try:
-                        final_url = fix_url(final_url)
-                    except Exception:
-                        final_url = final_url or current_url
-
-                    async with lock:
-                        if final_url not in all_links_set:
-                            all_links_set.add(final_url)
-                            all_links.append(final_url)
-
-                    successful_links.append(final_url)
+                    if final_url in processed_final_urls:
+                        logger.debug("skip duplicate final url %s (source %s)", final_url, current_url)
+                    else:
+                        try:
+                            links = await scrape_response_handler.handle(scrape_response) or []
+                        except Exception as e:
+                            error_obj = e
+                            failed_links.append(FailedLink(current_url, scrape_response.timed_out_navigating, error_obj))
+                            logger.exception("failed running handler for %s:", current_url)
+                        else:
+                            processed_final_urls.add(final_url)
+                            async with lock:
+                                if final_url not in all_links_set:
+                                    all_links_set.add(final_url)
+                                    all_links.append(final_url)
+                            successful_links.append(final_url)
 
                 if collect_responses and scrape_response:
                     async with lock:
                         responses.append(scrape_response)
 
-                next_remaining = remaining_depth - 1
-                # depth 0 should still be allowed because depth
-                # 1 should be actually scraping with a depth
-                if next_remaining > -1 and links:
-                    for link in links:
-                        if max_pages is not None and pages_processed >= max_pages:
-                            break
-                        if await should_enqueue(link, next_remaining):
-                            await queue.put((fix_url(link), next_remaining))
+                # enqueue new links only if we processed this final url just now
+                if final_url in processed_final_urls and not scrape_response.timed_out_navigating:
+                    # if depth is None there is no limit
+                    if (depth is None or current_depth < depth) and links:
+                        for link in links:
+                            if max_pages is not None and pages_processed >= max_pages:
+                                break
+                            if await should_enqueue(link):
+                                await queue.put((fix_url(link), current_depth + 1))
+
+                # close tab (timeout to avoid hang) unless it's the dedicated context tab
+                if scrape_response.tab and not (new_window and scrape_response.tab is instance):
+                    async def _close_tab(t_: nodriver.Tab):
+                        try:
+                            await asyncio.wait_for(t_.close(), timeout=5)
+                        except Exception:
+                            logger.warning("tab close failed or timed out for %s", getattr(t_, 'url', '<unknown>'))
+                    closing_tasks.append(asyncio.create_task(_close_tab(scrape_response.tab)))
             except Exception as e:
                 failed_links.append(FailedLink(current_url, False, e))
                 logger.exception("unexpected error during crawl for %s", current_url)
@@ -345,6 +351,14 @@ async def crawl(
             t.cancel()
         except Exception:
             logger.debug("failed closing dedicated context tab (already closed?)")
+
+    # wait for any outstanding close tasks (bounded wait) to avoid hanging loop
+    if closing_tasks:
+        done, pending = await asyncio.wait(closing_tasks, timeout=6)
+        for p in pending:
+            p.cancel()
+        if pending:
+            logger.warning("cancelled %d lingering tab close task(s)", len(pending))
 
     time_end = datetime.now(UTC)
     time_elapsed = time_end - time_start
@@ -386,7 +400,6 @@ async def scrape(
     wait_for_page_load = True,
     page_load_timeout = 60,
     extra_wait_ms = 0,
-    # solve_cloudflare = True, # not implemented yet
     new_tab = False,
     new_window = False,
     # request_paused_handler = ScrapeRequestPausedHandler,
@@ -488,6 +501,8 @@ async def scrape(
         if not nav_response.timed_out_navigating:
             # if it's taking forever to load, get_content() will also take forever to load
             scrape_response.html = await scrape_response.tab.evaluate("document.documentElement.outerHTML")
+            if isinstance(scrape_response.html, Exception):
+                raise scrape_response.html
             # use the final URL as the base for extracting links
             scrape_response.links = extract_links(scrape_response.html, scrape_response.url)
             if cloudflare.should_wait(scrape_response.html):
@@ -529,8 +544,10 @@ async def click_template_image(
     (`x_shift` and `y_shift`).
 
     if the template filename follows this pattern:
-    - `{name}__x{-?\d+}__y{-?\d+}`, 
-    
+    """\
+    r"- `{name}__x{-?\d+}__y{-?\d+}`,"\
+    """
+
     then the embedded shifts will be applied unless 
     `x_shift` or `y_shift` are explicitly set to non-zero values.
 
@@ -598,7 +615,7 @@ async def click_template_image(
         cv2.imwrite(str(out_path), scr)
 
     if match_pct / 100.0 < match_threshold:
-        logger.warning(
+        logger.debug(
             "skipping template %s: match=%.1f%% img=(%d,%d) css=(%.1f,%.1f) dpr=%.2f shift=(%d,%d)",
             tpl_path.name,
             match_pct,
@@ -616,7 +633,7 @@ async def click_template_image(
     css_x = cx_shifted / (dpr or 1.0)
     css_y = cy_shifted / (dpr or 1.0)
     await tab.mouse_click(css_x, css_y)
-    logger.info(
+    logger.debug(
         "successfully clicked best match coords for %s: match=%.1f%% img=(%d,%d) css=(%.1f,%.1f) dpr=%.2f shift=(%d,%d)",
         tpl_path.name,
         match_pct,

@@ -5,7 +5,7 @@ from nodriver import cdp, Tab, Connection, Browser
 import nodriver
 from ..cdp_helpers import can_use_domain
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("nodriverplus.TargetInterceptorManager")
 
 class NetworkWatcher:
 
@@ -120,7 +120,7 @@ class TargetInterceptorManager:
         :param interceptors: a list of `TargetInterceptor`'s to add to the manager.
         """
         self.connection = session.connection if isinstance(session, Browser) else session
-        self.interceptors = interceptors
+        self.interceptors = interceptors or []
         self.response_received_handlers = response_received_handlers
         self.request_ids_to_tab: dict[str, Tab] = {}
         self.request_sent_events: dict[str, cdp.network.RequestWillBeSent] = {}
@@ -153,7 +153,13 @@ class TargetInterceptorManager:
             if ev.target_info.type_ == "page":
                 filters.append({"type": "service_worker", "exclude": True})
                 # network can only be enabled on page targets
-                await connection.send(cdp.network.enable(), session_id)
+                try:
+                    await connection.send(cdp.network.enable(), session_id)
+                except Exception as e:
+                    if "-32001" in str(e):
+                        logger.warning("failed to enable network for %s: session not found. (potential timing issue?)", msg)
+                    else:
+                        logger.exception("failed to enable network for %s:", msg)
 
         else:
             msg = connection
@@ -194,7 +200,7 @@ class TargetInterceptorManager:
     async def on_loading_failed(self, ev: cdp.network.LoadingFailed):
         tab = self.request_ids_to_tab.get(ev.request_id)
         if tab is None:
-            logger.info("no tab found for LoadingFailed with request_id %s", ev.request_id)
+            logger.debug("no tab found for LoadingFailed with request_id %s", ev.request_id)
             return
 
         for handler in self.response_received_handlers:
@@ -244,12 +250,16 @@ class TargetInterceptorManager:
                 ev.session_id = None
                 await interceptor.on_change(connection, ev)
             except Exception as e:
-                if "-32000" in str(e):
+                if "server rejected WebSocket connection: HTTP 500" in str(e):
+                    # debug since target changes may be because the target was closed
+                    logger.debug("failed to apply interceptor (on_change) %s: target already moved/closed", msg)
+                elif "-32000" in str(e):
                     logger.warning("failed to apply interceptor (on_change) %s: execution context not created yet", msg)
                 elif "-32001" in str(e):
                     logger.warning("failed to apply interceptor (on_change) %s: session not found. (potential timing issue?)", msg)
                 elif "-32601" in str(e):
-                    logger.warning("failed to apply interceptor (on_change) %s: method not found", msg)
+                    # same here
+                    logger.debug("failed to apply interceptor (on_change) %s: method not found", msg)
                 else: 
                     logger.exception("failed to apply interceptor (on_change) %s:", msg)
 

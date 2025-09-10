@@ -10,7 +10,7 @@ import nodriver
 from .scrape_response import ScrapeResponseHandler, CrawlResultHandler
 from .tab import crawl, scrape
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("nodriverplus.Manager")
 
 
 class ManagerJob:

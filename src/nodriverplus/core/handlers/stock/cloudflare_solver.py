@@ -12,12 +12,12 @@ from nodriver import cdp
 from ..target_intercepted import NetworkWatcher
 from ...tab import click_template_image
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("nodriverplus.CloudflareSolver")
 
 class HangingHandler(http.server.BaseHTTPRequestHandler):
     server: "HangingServer"
     def do_GET(self):
-        logger.debug("hanging request %s", self.path)
+        logger.debug("received hanging request: %s", self.path)
         # single critical section to avoid race where release happens between initial check and append
         event = threading.Event()
         immediate = False
@@ -35,9 +35,11 @@ class HangingHandler(http.server.BaseHTTPRequestHandler):
                 self.send_response(200)
                 self.end_headers()
                 self.wfile.write(b"OK")
-                logger.info("released hanging request %s (immediate)", self.path)
+                logger.debug("released hanging request: %s (immediate)", self.path)
             except BrokenPipeError:
-                logger.debug("client closed before immediate release %s", self.path)
+                logger.debug("client closed before immediate release (BrokenPipeError): %s", self.path)
+            except ConnectionAbortedError:
+                logger.debug("client closed before immediate release (ConnectionAbortedError): %s", self.path)
             return
 
         event.wait()
@@ -45,9 +47,11 @@ class HangingHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"OK")
-            logger.info("released hanging request %s", self.path)
+            logger.debug("released hanging request: %s", self.path)
         except BrokenPipeError:
-            logger.debug("client closed before gated release %s", self.path)
+            logger.debug("client closed before gated release (BrokenPipeError): %s", self.path)
+        except ConnectionAbortedError:
+            logger.debug("client closed before gated release (ConnectionAbortedError): %s", self.path)
 
     def log_message(self, format, *args):
         # silence logs
@@ -67,22 +71,36 @@ class HangingServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         # protect active_requests and released_paths
         self._lock = threading.Lock()
 
+        self.domain = f"{self.server_address[0]}:{self.server_address[1]}"
+
     def release_block(self, path: str):
         with self._lock:
             for handler, event, p in list(self.active_requests):
                 if p == path:
                     event.set()
                     self.active_requests.remove((handler, event, p))
-                    logger.debug("signalled hanging request %s", path)
+                    logger.debug("signalled release of hanging request: %s", path)
                     return True
             if path not in self.released_paths:
                 self.released_paths.add(path)
-                logger.debug("pre-released path %s", path)
+                logger.debug("pre-released hanging request: %s", path)
             return False
 
 class CloudflareSolver(NetworkWatcher):
     """
-    stock `ResponseReceivedHandler` for detecting Cloudflare protection
+    stock `ResponseReceivedHandler` for detecting and solving Cloudflare challenges
+
+    this handler works by detecting cloudflare challenge responses
+    and then injecting an image into the page that will hang while
+    it clicks the checkbox until `cf_clearance` is obtained.
+
+    **TODO**:
+    - this handler cannot detect login based turnstile challenges yet,
+    only generic checkbox challenges.
+    - move HangingServer to it's own API that users can easily use to:
+        - specify when to hang
+        - do stuff in the middle
+        - specify when to release
     """
 
     def __init__(self, 
@@ -94,6 +112,7 @@ class CloudflareSolver(NetworkWatcher):
         # address family the server listens on (avoids ::1 vs 127.0.0.1 mismatch)
         self.server = HangingServer(("127.0.0.1", hanging_server_port), HangingHandler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
         self.gates: dict[cdp.target.TargetID, dict[str, str]] = {}
         # track gate creation times to reap stale ones
         self._gate_created: dict[cdp.target.TargetID, dict[str, float]] = {}
@@ -110,16 +129,16 @@ class CloudflareSolver(NetworkWatcher):
                         for request_id, path in list(gates.items()):
                             ts = created.get(request_id)
                             if ts and now - ts > max_age:
-                                logger.debug("background reaper releasing stale gate %s <%s>", request_id, path)
+                                logger.debug("reaper releasing stale gate %s -> %s", request_id, path)
                                 self.server.release_block(path)
                                 gates.pop(request_id, None)
                                 created.pop(request_id, None)
                 except Exception:
-                    logger.exception("error in gate reaper: %s")
+                    logger.exception("error in gate reaper")
                 time.sleep(interval)
         threading.Thread(target=loop, daemon=True).start()
 
-    def _cleanup_stale_gates(self, tab: nodriver.Tab, max_age: float = 30.0):
+    def _cleanup_stale_gates(self, tab: nodriver.Tab, max_age: float = 4.0):
         # release any gates older than max_age seconds
         target_id = tab.target_id
         created = self._gate_created.get(target_id)
@@ -132,7 +151,7 @@ class CloudflareSolver(NetworkWatcher):
                 path = self.gates[target_id][request_id]
                 stale.append((request_id, path))
         for request_id, path in stale:
-            logger.debug("releasing stale gate %s <%s>", request_id, path)
+            logger.debug("releasing stale gate %s -> %s", request_id, path)
             self.server.release_block(path)
             self.gates[target_id].pop(request_id, None)
             created.pop(request_id, None)
@@ -141,45 +160,48 @@ class CloudflareSolver(NetworkWatcher):
         ev: cdp.network.ResponseReceived, 
         tab: nodriver.Tab,
     ):
-        cdp.network
-        logger.info("cloudflare challenge detected %s", ev.response.url)
+        logger.info("cloudflare challenge detected on %s", tab)
         tab._has_cf_clearance = False
         tab._cf_turnstile_detected = True
 
-        while tab._has_cf_clearance is False:
+        while not tab._has_cf_clearance:
             # try both light and dark template images
             for template in [
                 "cloudflare_light__x-120__y0.png",
                 "cloudflare_dark__x-120__y0.png",
             ]:
+                if tab._has_cf_clearance:
+                    break
                 await click_template_image(
                     tab,
                     template,
                     flash_point=True,
                     save_annotated_screenshot=self.save_annotated_screenshot,
                 )
-                await asyncio.sleep(0.5)
+            await asyncio.sleep(0.5)
 
     async def on_clearance(self,
         ev: cdp.network.ResponseReceived, 
         tab: nodriver.Tab,
     ):
-        logger.info("cloudflare clearance %s", ev.response.url)
-        await tab.reload(ignore_cache=False)
+        logger.debug("clearance response on %s", ev.response.url)
+        await tab.reload()
         tab._has_cf_clearance = True
         tab._cf_turnstile_detected = False
-        logger.info("successfully reload and set _has_cf_clearance on %s", tab.url)
+        logger.info("successfully solved cloudflare challenge for %s", tab)
+
+    async def should_ignore_url(self, url):
+        return re.match(rf"^(blob:|data:|http://{self.server.domain}/[\w]{{32}})", url)
 
     async def on_request(self, tab, ev, extra_info):
-        domain = f"{self.server.server_address[0]}:{self.server.server_address[1]}"
-        if (re.match(rf"^(blob:|http://{domain}/[\w]{{32}})", ev.request.url) or ev.request.method.lower() != "get"):
-            logger.debug("ignore request %s", ev.request.url)
+        if (self.should_ignore_url(ev.request.url) or ev.request.method.lower() != "get"):
+            logger.debug("ignoring request: %s", ev.request.url)
             return
         current_gates = self.gates.get(tab.target_id, {})
         if current_gates.get(ev.request_id):
             self.server.release_block(current_gates[ev.request_id])
             self.gates[tab.target_id].pop(ev.request_id, None)
-            logger.debug("released gate for redirect %s", ev.request_id)
+            logger.debug("released gate for redirect: %s", ev.request_id)
 
         unique_path = f"/{os.urandom(16).hex()}"
         target_id = tab.target_id
@@ -188,35 +210,43 @@ class CloudflareSolver(NetworkWatcher):
             self._gate_created[target_id] = {}
         self.gates[target_id][ev.request_id] = unique_path
         self._gate_created[target_id][ev.request_id] = time.time()
-        unique_url = f"http://{domain}{unique_path}"
-        logger.debug("gate %s -> %s origin=%s", ev.request_id, unique_url, ev.request.url)
+        unique_url = f"http://{self.server.domain}{unique_path}"
+        logger.debug("gate %s -> %s (origin=%s)", ev.request_id, unique_url, ev.request.url)
 
         await tab.evaluate(f"new Image().src = '{unique_url}';")
         # opportunistically cleanup stale gates
         self._cleanup_stale_gates(tab)
 
     async def on_loading_failed(self, tab, ev, request_will_be_sent):
-        req_url = getattr(getattr(request_will_be_sent, "request", None), "url", "<unknown>")
-        logger.debug("loading failed %s %s err=%s", ev.request_id, req_url, ev.error_text)
+        req_url = request_will_be_sent.request.url if request_will_be_sent else "unknown"
+        logger.debug("loading failed req=%s url=%s err=%s", ev.request_id, req_url, ev.error_text)
         # release gate if a gated request failed
         target_id = tab.target_id
         gates = self.gates.get(target_id)
         if not gates:
-            logger.info("no gates found for %s", tab)
+            logger.debug("no gates found for %s", tab)
             return
         path = gates.get(ev.request_id)
         if not path:
-            logger.info("no gate found for failed request %s <%s>", ev.request_id, req_url)
+            # no gate was created for this request id
+            logger.debug("no gate for failed request %s <%s>", ev.request_id, req_url)
             return
-        logger.debug("releasing gate after loading failed %s <%s> error=%s", ev.request_id, path, ev.error_text)
-        self.server.release_block(path)
+
+        # signal the hanging handler and remove gate/state
+        try:
+            self.server.release_block(path)
+        except Exception:
+            logger.exception("error releasing gate for failed request %s -> %s", ev.request_id, path)
+
         gates.pop(ev.request_id, None)
+        # also clear creation timestamp if present
         self._gate_created.get(target_id, {}).pop(ev.request_id, None)
+        logger.debug("releasing gate after loading failed %s <%s> err=%s", ev.request_id, path, ev.error_text)
         self._cleanup_stale_gates(tab)
 
     async def on_response(self, tab, ev, extra_info):
-        if re.match(rf"^(blob:|http://{self.server.server_address[0]}:{self.server.server_address[1]}/[\w]{{32}})", ev.response.url):
-            logger.debug("ignore hanging response %s", ev.response.url)
+        if self.should_ignore_url(ev.response.url):
+            logger.debug("ignoring response: %s", ev.response.url)
             return
         headers = extra_info.headers.to_json() if extra_info else ev.response.headers.to_json()
 
@@ -228,7 +258,7 @@ class CloudflareSolver(NetworkWatcher):
         logger.debug("cookies(%s) %s", ev.request_id, cookies_list)
         turnstile = re.match(r".*\/turnstile\/v0(\/.*)?\/api\.js*", ev.response.url)
 
-        logger.debug("cf headers ray=%s turnstile=%s", cf_ray, bool(turnstile))
+        logger.debug("headers ray=%s turnstile=%s", cf_ray, bool(turnstile))
         if cf_chl_gen:
             if "cf_clearance" in cookies_list:
                 await tab.send(cdp.network.delete_cookies(
@@ -245,20 +275,20 @@ class CloudflareSolver(NetworkWatcher):
             await self.on_detect(ev, tab)
         elif "cf_clearance=" in set_cookie:
             await self.on_clearance(ev, tab)
-            
+
             gates = self.gates.get(tab.target_id, {}).copy()
             for request_id, path in gates.items():
                 self.server.release_block(path)
                 self.gates[tab.target_id].pop(request_id, None)
-            logger.debug("cleared gates target %s", tab.target_id)
+            logger.debug("cleared gates for target %s", tab.target_id)
         else:
             try:
                 path = self.gates[tab.target_id][ev.request_id]
             except KeyError:
-                logger.debug("no gate found for response %s %s", ev.request_id, ev.response.url)
+                logger.debug("no gate for response %s %s", ev.request_id, ev.response.url)
                 return
             self.server.release_block(path)
-            logger.debug("released gate for response %s %s", ev.request_id, path)
+            logger.debug("released gate for response %s -> %s", ev.request_id, path)
             self.gates[tab.target_id].pop(ev.request_id, None)
             self._gate_created.get(tab.target_id, {}).pop(ev.request_id, None)
         # cleanup stale after each response

@@ -7,7 +7,7 @@ from .scrape_response import (
     ScrapeResponse, 
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("nodriverplus.browser")
 
 async def get(
     base: nodriver.Tab | nodriver.Browser,

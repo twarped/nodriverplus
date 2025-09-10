@@ -4,7 +4,7 @@ from nodriver import cdp
 from ..target_intercepted import TargetInterceptor
 from ...cdp_helpers import can_use_domain
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("nodriverplus.WindowSizePatch")
 
 
 async def patch_window_size(

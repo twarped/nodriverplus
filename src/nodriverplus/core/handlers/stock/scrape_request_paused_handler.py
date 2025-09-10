@@ -12,7 +12,7 @@ from ..request_paused import RequestPausedHandler
 from ...scrape_response import ScrapeResponse, ScrapeResponseIntercepted, ScrapeRequestIntercepted
 import base64
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("nodriverplus.ScrapeRequestPausedHandler")
 
 
 class ScrapeRequestPausedHandler(RequestPausedHandler):
