@@ -108,3 +108,11 @@ def assert_domain(target_type: str, domain: str) -> None:
     """raise ValueError if `domain` isn't available on `target_type`."""
     if not can_use_domain(target_type, domain):
         raise ValueError(f"{target_type!r} cannot call {domain}.enable()")
+    
+__all__ = [
+    "TARGET_DOMAINS",
+    "domains_for",
+    "can_use_domain",
+    "target_types_for",
+    "assert_domain",
+]

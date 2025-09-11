@@ -9,17 +9,36 @@ from .core.scrape_response import (
     ScrapeResponseIntercepted, 
     ScrapeRequestIntercepted
 )
-from nodriverplus.core.tab import (
+from .core.handlers import (
+    NetworkWatcher,
+    TargetInterceptor,
+    TargetInterceptorManager,
+    UserAgentPatch,
+    WindowSizePatch,
+    CloudflareSolver,
+)
+from . import utils
+import nodriver
+from nodriver import cdp
+from .core.browser import (
+    get,
+    get_with_timeout,
+    stop,
+)
+from .core.tab import (
     wait_for_page_load,
     get_user_agent,
     crawl,
     scrape,
     click_template_image,
 )
-from .core.handlers import stock
-from . import utils
-import nodriver
-from nodriver import cdp
+from .core.cdp_helpers import (
+    TARGET_DOMAINS,
+    assert_domain,
+    can_use_domain,
+    domains_for,
+    target_types_for
+)
 
 __all__ = [
     "CrawlResult",
@@ -33,11 +52,24 @@ __all__ = [
     "ScrapeResponseHandler",
     "ScrapeResponseIntercepted",
     "ScrapeRequestIntercepted",
+    "NetworkWatcher",
+    "TargetInterceptor",
+    "TargetInterceptorManager",
+    "UserAgentPatch",
+    "WindowSizePatch",
+    "CloudflareSolver",
     "utils",
+    "get",
+    "get_with_timeout",
+    "stop",
     "wait_for_page_load",
     "get_user_agent",
     "crawl",
     "scrape",
     "click_template_image",
-    "stock",
+    "TARGET_DOMAINS",
+    "assert_domain",
+    "can_use_domain",
+    "domains_for",
+    "target_types_for"
 ]

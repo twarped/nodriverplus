@@ -24,14 +24,6 @@ class ManagerJob:
         self.type_ = type_
         self.kwargs = kwargs
 
-    def from_dict(cls, kwargs: dict):
-        return cls(
-            url=kwargs["url"],
-            type_=kwargs["type_"],
-            kwargs=kwargs["kwargs"]
-        )
-
-
 class Manager:
     queue: _thread_queue.Queue
     concurrency: int

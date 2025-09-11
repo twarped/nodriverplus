@@ -508,18 +508,7 @@ async def scrape(
                 raise scrape_response.html
             # use the final URL as the base for extracting links
             scrape_response.links = extract_links(scrape_response.html, scrape_response.url)
-            scrape_response.elapsed = timedelta(seconds=time.monotonic() - start)
-            elapsed_seconds = scrape_response.elapsed.total_seconds()
-            logger.info("successfully finished scrape for %s (elapsed=%.2fs)", url, elapsed_seconds)
-        else:
-            scrape_response.elapsed = timedelta(seconds=time.monotonic() - start)
-    except Exception:
-        scrape_response.elapsed = timedelta(seconds=time.monotonic() - start)
-        elapsed_seconds = scrape_response.elapsed.total_seconds()
-        logger.exception(
-            "unexpected error during scrape for %s (elapsed=%.2fs):", url, elapsed_seconds
-        )
-    finally:
+        
         # run handler + teardown before possibly closing the tab
         if scrape_response_handler:
             # run handler only if links not already populated to avoid double execution under crawl()
@@ -527,7 +516,17 @@ async def scrape(
                 scrape_response.links = await scrape_response_handler.handle(scrape_response)
             except Exception:
                 logger.exception("error running scrape_response_handler for %s", url)
+        scrape_response.elapsed = timedelta(seconds=time.monotonic() - start)
+        elapsed_seconds = scrape_response.elapsed.total_seconds()
+        logger.info("successfully finished scrape for %s (elapsed=%.2fs)", url, elapsed_seconds)
+
         # await request_paused_handler.stop()
+    except Exception:
+        scrape_response.elapsed = timedelta(seconds=time.monotonic() - start)
+        elapsed_seconds = scrape_response.elapsed.total_seconds()
+        logger.exception(
+            "unexpected error during scrape for %s (elapsed=%.2fs):", url, elapsed_seconds
+        )
 
     return scrape_response
 
@@ -654,6 +653,8 @@ async def click_template_image(
 
 __all__ = [
     "wait_for_page_load",
+    "get",
+    "get_with_timeout",
     "get_user_agent",
     "crawl",
     "scrape",

@@ -2,7 +2,6 @@ import asyncio
 import logging
 from nodriverplus import (
     NodriverPlus,
-    Manager,
     ScrapeResponseHandler,
     CrawlResultHandler,
 )

@@ -23,11 +23,9 @@ from .manager import Manager
 from .handlers import TargetInterceptor, TargetInterceptorManager, NetworkWatcher
 from .handlers.stock import (
     UserAgentPatch, 
-    patch_user_agent,
     # not working as intended currently
     # ScrapeRequestPausedHandler,
     WindowSizePatch,
-    patch_window_size,
     CloudflareSolver,
 )
 
@@ -163,7 +161,7 @@ class NodriverPlus:
                 UserAgentPatch(self.user_agent, self.hide_headless)
             )
 
-        await patch_user_agent(
+        await UserAgentPatch.patch_user_agent(
             self.browser.main_tab, 
             None,
             self.user_agent,
@@ -172,7 +170,7 @@ class NodriverPlus:
 
         if window_size:
             width, height = window_size
-            await patch_window_size(
+            await WindowSizePatch.patch_window_size(
                 self.browser.main_tab,
                 None,
                 width=width,

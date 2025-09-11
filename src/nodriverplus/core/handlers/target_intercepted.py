@@ -1,9 +1,11 @@
 import asyncio
 import websockets
 import logging
+import traceback
 from typing import Callable, Awaitable
 from nodriver import cdp, Tab, Connection, Browser
 from ..cdp_helpers import can_use_domain
+import os
 
 logger = logging.getLogger("nodriverplus.TargetInterceptorManager")
 
@@ -174,26 +176,46 @@ class TargetInterceptorManager:
         if handler is None:
             logger.debug("no handler mapped for %s", event_type)
             return
-
-        msg = f"failed to run handler {handler} for event {event_type}:"
+        msg = f"failed to run {handler.__name__} for {event_type}"
+        if hasattr(ev, "target_info"):
+            msg += f" on {ev.target_info.type_} <{ev.target_info.url}>:"
+        else:
+            msg += ":"
+        def _log_exc_debug(msg, *a):
+            logger.debug(msg, *a, exc_info=True)
+        def _log_exc_warning(msg, *a):
+            logger.warning(msg, *a, exc_info=logger.getEffectiveLevel() <= logging.DEBUG)
         try:
-            await handler(ev)
-        except websockets.exceptions.ConnectionClosedOK:
-            logger.debug("%s target already moved/closed", msg)
-        except websockets.exceptions.ConnectionClosedError:
-            logger.debug("%s target already moved/closed", msg)
+            try:
+                await handler(ev)
+            except Exception as e:
+                current_file = os.path.normcase(os.path.normpath(__file__))
+                extracted = traceback.extract_tb(e.__traceback__)
+                for frame in extracted:
+                    frame_file = os.path.normcase(os.path.normpath(frame.filename))
+                    if frame_file != current_file:
+                        msg += f"\n{frame.filename}:{frame.lineno} in {frame.name}:\n"
+                        break
+                raise e
+        except (
+            websockets.exceptions.ConnectionClosedOK, 
+            websockets.exceptions.ConnectionClosedError
+        ) as e:
+            _log_exc_debug("%s target already moved/closed.", msg)
         except websockets.exceptions.InvalidStatus as e:
             if e.response.body.startswith(b'No such target id:'):
-                logger.debug("%s target already moved/closed", msg)
+                _log_exc_debug("%s target already moved/closed.", msg)
             else:
                 logger.exception(msg)
+        except (EOFError, websockets.exceptions.InvalidMessage):
+            _log_exc_debug("%s websocket handshake/parse already closed.", msg)
         except Exception as e:
             if "-32000" in str(e):
-                logger.warning("%s execution context not created yet", msg)
+                _log_exc_warning("%s execution context not created yet.", msg)
             elif "-32001" in str(e):
-                logger.warning("%s session not found. (potential timing issue?)", msg)
+                _log_exc_warning("%s session not found. (potential timing issue?)", msg)
             elif "-32601" in str(e):
-                logger.debug("%s method not found", msg)
+                _log_exc_debug("%s method not found.", msg)
             else:
                 logger.exception(msg)
 
@@ -211,7 +233,7 @@ class TargetInterceptorManager:
         connection = self.connection
         filters = [
             {"type": "tab", "exclude": True},
-            {"type": "iframe", "exclude": True}
+            {"type": "iframe", "exclude": True} # can't figure this one out yet
         ]
 
         if ev:

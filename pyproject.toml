@@ -37,7 +37,7 @@ markers = [
     "manager: tests that require the nodriver manager",
     "crawl: tests that involve `crawl()`",
     "scrape: tests that involve `scrape()`",
-    "bytes_: tests that involve scraped bytes",
+    # "bytes_: tests that involve scraped bytes",
     "stealth: tests that involve stealth",
     "markdown: tests that involve Markdown conversion",
 ]

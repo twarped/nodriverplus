@@ -7,69 +7,13 @@ from ...cdp_helpers import can_use_domain
 logger = logging.getLogger("nodriverplus.WindowSizePatch")
 
 
-async def patch_window_size(
-	connection: nodriver.Tab | nodriver.Connection,
-	ev: cdp.target.AttachedToTarget | None,
-	*,
-	width: int,
-	height: int,
-	device_scale_factor: float = 1.0,
-	mobile: bool = False,
-	orientation: str | None = None,
-):
-	"""apply device metrics override if emulation domain is available.
-
-	keeps quiet when emulation is not exposed (workers/etc.). mirrors screen size
-	so detection scripts comparing inner/outer sizes see consistent values.
-
-	:param ev: may be None when called directly on a tab with no attach event.
-	:param width: viewport width css px.
-	:param height: viewport height css px.
-	:param device_scale_factor: dpr (usually 1.0 for desktop).
-	:param mobile: emulate mobile viewport if True.
-	:param orientation: optional orientation (landscapePrimary / portraitPrimary).
-	"""
-
-	if isinstance(connection, nodriver.Tab) and ev is None:
-		target_type = "tab"
-		session_id = None
-		msg = f"tab <{connection.url}>"
-	else:
-		target_type = ev.target_info.type_
-		session_id = ev.session_id
-		msg = f"{target_type} <{ev.target_info.url}>"
-
-	if not can_use_domain(target_type, "Emulation") or target_type not in ("page", "tab", "iframe"):
-		logger.debug("skipping window size patch for %s", msg)
-		return
-
-	try:
-		await connection.send(cdp.emulation.set_device_metrics_override(
-			width,
-			height,
-			device_scale_factor,
-			mobile,
-			screen_width=width,
-			screen_height=height,
-			screen_orientation={"type": orientation, "angle": 0} if orientation else None
-		), session_id)
-	except Exception:
-		logger.exception("failed patching window size for %s:", msg)
-	else:
-		logger.debug(
-			"successfully patched window size for %s (width=%d height=%d dpr=%s mobile=%s)",
-			msg,
-			width,
-			height,
-			device_scale_factor,
-			mobile,
-		)
-
-
 class WindowSizePatch(TargetInterceptor):
 	"""stock interceptor for setting viewport metrics via emulation domain.
 
 	skips targets without emulation. mirrors width/height to screen metrics.
+
+	call `WindowSizePatch.patch_window_size()` directly—with
+	or without creating a new instance—to patch an existing `Tab` or `Connection`.
 	"""
 
 	width: int
@@ -98,7 +42,7 @@ class WindowSizePatch(TargetInterceptor):
 		connection: nodriver.Tab | nodriver.Connection,
 		ev: cdp.target.AttachedToTarget | None,
 	):
-		await patch_window_size(
+		await self.patch_window_size(
 			connection,
 			ev,
 			width=self.width,
@@ -108,3 +52,62 @@ class WindowSizePatch(TargetInterceptor):
 			orientation=self.orientation,
 		)
 
+	@staticmethod
+	async def patch_window_size(
+		connection: nodriver.Tab | nodriver.Connection,
+		ev: cdp.target.AttachedToTarget | None,
+		*,
+		width: int,
+		height: int,
+		device_scale_factor: float = 1.0,
+		mobile: bool = False,
+		orientation: str | None = None,
+	):
+		"""static method for applying a device metrics
+		override if emulation domain is available.
+
+		keeps quiet when emulation is not exposed (workers/etc.). mirrors screen size
+		so detection scripts comparing inner/outer sizes see consistent values.
+
+		:param ev: may be None when called directly on a tab with no attach event.
+		:param width: viewport width css px.
+		:param height: viewport height css px.
+		:param device_scale_factor: dpr (usually 1.0 for desktop).
+		:param mobile: emulate mobile viewport if True.
+		:param orientation: optional orientation (landscapePrimary / portraitPrimary).
+		"""
+
+		if isinstance(connection, nodriver.Tab) and ev is None:
+			target_type = "tab"
+			session_id = None
+			msg = f"tab <{connection.url}>"
+		else:
+			target_type = ev.target_info.type_
+			session_id = ev.session_id
+			msg = f"{target_type} <{ev.target_info.url}>"
+
+		if not can_use_domain(target_type, "Emulation") or target_type not in ("page", "tab", "iframe"):
+			logger.debug("skipping window size patch for %s", msg)
+			return
+
+		try:
+			await connection.send(cdp.emulation.set_device_metrics_override(
+				width,
+				height,
+				device_scale_factor,
+				mobile,
+				screen_width=width,
+				screen_height=height,
+				screen_orientation={"type": orientation, "angle": 0} if orientation else None
+			), session_id)
+		except Exception:
+			logger.exception("failed patching window size for %s:", msg)
+		else:
+			logger.debug(
+				"successfully patched window size for %s (width=%d height=%d dpr=%s mobile=%s)",
+				msg,
+				width,
+				height,
+				device_scale_factor,
+				mobile,
+			)

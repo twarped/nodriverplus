@@ -1,5 +1,3 @@
-import asyncio
-from typing import Callable, Awaitable
 import nodriver
 from datetime import datetime, timedelta
 
@@ -7,6 +5,9 @@ from datetime import datetime, timedelta
 
 mirrors style in `nodriverplus` core: simple models (responses, requests, crawl results)
 and pluggable handler classes that callers can override / monkeypatch.
+
+**TODO**:
+- fix bytes streaming (currently disabled due to cloudflare issues)
 """
 
 class ScrapeResponseIntercepted:
@@ -60,7 +61,6 @@ class ScrapeResponse:
     :param timed_out_navigating: navigation phase timed out.
     :param timed_out_loading: load event phase timed out.
     :param html: captured html ("" when load timeout + outerHTML fallback failed).
-    :param `bytes_`: raw body bytes (only for non-text types when streamed).
     :param mime: mime of main response.
     :param headers: main response headers (lowercased keys).
     :param intercepted_responses: map of url->ScrapeResponseIntercepted.
@@ -70,13 +70,15 @@ class ScrapeResponse:
     :param current_depth: mostly used by `crawl()` to pass on to handlers:
     depth of this scrape in the overall crawl (0 = seed).
     """
+    # bytes_ is disabled due to cloudflare+request interception issues.
+    # :param `bytes_`: raw body bytes (only for non-text types when streamed).
     url: str
     tab: nodriver.Tab
     timed_out: bool
     timed_out_navigating: bool
     timed_out_loading: bool
     html: str
-    bytes_: bytes
+    # bytes_: bytes
     # avoid attribute errors for handlers expecting .links
     links: list[str] = []
     mime: str
@@ -93,7 +95,7 @@ class ScrapeResponse:
         timed_out_navigating: bool = False,
         timed_out_loading: bool = False,
         html: str = None, 
-        bytes_: bytes = None, 
+        # bytes_: bytes = None, 
         mime: str = None, 
         headers: dict = None, 
         intercepted_responses: dict[str, ScrapeResponseIntercepted] = {},
@@ -109,7 +111,6 @@ class ScrapeResponse:
         :param timed_out_navigating: navigation phase timed out.
         :param timed_out_loading: load event phase timed out.
         :param html: captured html ("" when load timeout + outerHTML fallback failed).
-        :param `bytes_`: raw body bytes (only for non-text types when streamed).
         :param mime: mime of main response.
         :param headers: main response headers (lowercased keys).
         :param intercepted_responses: map of url->ScrapeResponseIntercepted.
@@ -119,6 +120,7 @@ class ScrapeResponse:
         :param current_depth: mostly used by `crawl()` to pass on to handlers:
         depth of this scrape in the overall crawl (0 = seed).
         """
+        # :param `bytes_`: raw body bytes (only for non-text types when streamed).
 
         self.url = url
         self.tab = tab
@@ -126,7 +128,7 @@ class ScrapeResponse:
         self.timed_out_navigating = timed_out_navigating
         self.timed_out_loading = timed_out_loading
         self.html = html
-        self.bytes_ = bytes_
+        # self.bytes_ = bytes_
         self.mime = mime
         self.headers = headers
         self.intercepted_responses = intercepted_responses
@@ -166,12 +168,13 @@ class ScrapeResponseHandler:
         pass
 
 
-    async def bytes_(self, scrape_response: ScrapeResponse):
-        """process raw bytes when non-text main response was streamed.
+    # disabled due to cloudflare+request interception issues.
+    # async def bytes_(self, scrape_response: ScrapeResponse):
+    #     """process raw bytes when non-text main response was streamed.
 
-        :param scrape_response: response object. (mutable)
-        """
-        pass
+    #     :param scrape_response: response object. (mutable)
+    #     """
+    #     pass
 
 
     async def links(self, scrape_response: ScrapeResponse) -> list[str] | None:
@@ -193,6 +196,7 @@ class ScrapeResponseHandler:
         `timed_out()`
 
         or: `html()` -> `bytes_()` -> `links()`
+        **— currently,** `bytes_()` is disabled due to Cloudflare issues.
 
         :param scrape_response: scrape response object (mutable).
         :return: list of links to continue crawl with.
@@ -205,8 +209,8 @@ class ScrapeResponseHandler:
 
         # process the response
         await self.html(scrape_response)
-        if scrape_response.bytes_:
-            await self.bytes_(scrape_response)
+        # if scrape_response.bytes_:
+        #     await self.bytes_(scrape_response)
 
         # return the links for the crawler to follow
         return await self.links(scrape_response)

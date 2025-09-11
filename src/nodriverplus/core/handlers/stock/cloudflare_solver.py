@@ -10,6 +10,7 @@ use the new `CaptchaSolver` API.
 import asyncio
 import re
 import os
+import sys
 import logging
 import http.server
 import socketserver
@@ -93,6 +94,23 @@ class HangingServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self.released_paths: set[str] = set()
         # protect active_requests and released_paths
         self._lock = threading.Lock()
+
+    def handle_error(self, request, client_address):
+        """overrides default error handling to quietly ignore benign
+        `ConnectionResetError` instances that happen during shutdown.
+
+        this prevents noisy tracebacks like `"ConnectionResetError: An
+        existing connection was forcibly closed by the remote host"` from
+        being printed to stderr while still delegating other exceptions to
+        the base implementation.
+        """
+
+        exc_type, exc_value, _ = sys.exc_info()
+        if isinstance(exc_value, ConnectionResetError):
+            logger.debug("ignored ConnectionResetError from %s", client_address)
+            return
+        # fallback to default for anything else
+        return super().handle_error(request, client_address)
 
     def release_block(self, path: str):
         """release a hanging request if it exists, otherwise pre-release the path
