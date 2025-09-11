@@ -25,11 +25,11 @@ class UserAgentPatch(TargetInterceptor):
         self.user_agent = user_agent
         self.hide_headless = hide_headless
 
-    async def on_attach(self, connection: nodriver.Connection, ev: cdp.target.AttachedToTarget):
+    async def on_attach(self, connection, ev):
         await self.patch_user_agent(connection, ev, self.user_agent, self.hide_headless)
 
-    async def on_change(self, tab, ev):
-        await self.patch_user_agent(tab, ev, self.user_agent, self.hide_headless)
+    async def on_change(self, connection, ev):
+        await self.patch_user_agent(connection, ev, self.user_agent, self.hide_headless)
 
     @staticmethod
     async def patch_user_agent( 

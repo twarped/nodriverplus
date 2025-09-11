@@ -31,7 +31,7 @@ class NetworkWatcher:
         """
         handle a `ResponseReceived` event
         
-        :param connection: the `Tab` the event was received on.
+        :param tab: the `Tab` the event was received on.
         :param ev: the `ResponseReceived` event.
         :param extra_info: the `ResponseReceivedExtraInfo` event, if available.
         """
@@ -68,7 +68,7 @@ class NetworkWatcher:
         """
         handle a `RequestWillBeSent` event
 
-        :param connection: the `Tab` the event was received on.
+        :param tab: the `Tab` the event was received on.
         :param ev: the `RequestWillBeSent` event.
         :param extra_info: the `RequestWillBeSentExtraInfo` event, if available.
         """
@@ -112,12 +112,12 @@ class TargetInterceptor:
 
     async def on_change(
         self,
-        tab: Tab | Connection,
+        connection: Tab | Connection,
         ev: cdp.target.TargetInfoChanged | None,
     ):
         """hook for handling target change events
 
-        :param tab: the Tab instance where the event was received.
+        :param connection: the Tab instance where the event was received.
         :param ev: the target info changed event
         :type ev: TargetInfoChanged | None
         """
