@@ -206,7 +206,7 @@ class NodriverPlus:
     ):
         """customizable crawl API starting at `url` up to `depth`.
 
-        schedules scrape tasks with a worker pool, collects response metadata, errors,
+        schedules scrape tasks with a worker pool, collects result metadata, errors,
         links, and timing. handler is invoked for each page producing optional new links.
 
         if `crawl_result_handler` is specified, `crawl_result_handler.handle()` will 
