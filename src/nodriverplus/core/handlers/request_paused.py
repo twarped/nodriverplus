@@ -275,9 +275,6 @@ class RequestPausedHandler:
         return False
     
 
-    # TODO:
-    # should it be `response_error_reason` or `error_reason`?
-    # or even `request_error_reason`?
     async def fail_request(self, ev: cdp.fetch.RequestPaused):
         """send a Fetch.failRequest CDP command for the paused request.
 
@@ -306,21 +303,20 @@ class RequestPausedHandler:
         return False
     
 
-    # TODO:
-    # should it be `response_status_code` or `response_code`?
-    # should it be `response_status_text` or `response_phrase`?
     async def fulfill_request(self, ev: cdp.fetch.RequestPaused):
         """issue Fetch.fulfillRequest with fields extracted from `ev`.
-
-        expected `ev` state:
-        - response_status_code: int status to emit
-        - response_headers: list[HeaderEntry]
-        - binary_response_headers (optional)
-        - body (optional base64) — mutated previously (e.g. by streaming helpers)
 
         mutation note: body / headers may have been set by earlier steps (e.g. stream capture).
 
         :param ev: interception event containing response parameters (MUTATED PRIOR).
+
+        expected `ev` state:
+        - `request_id`: str
+        - `response_status_code`: int status to emit
+        - `response_status_text`: (optional) str status text
+        - `response_headers`: list[HeaderEntry]
+        - `binary_response_headers`: (optional)
+        - `body`: (optional base64) — mutated previously (e.g. by streaming helpers)
         """
         await self.tab.send(
             cdp.fetch.fulfill_request(
@@ -469,15 +465,19 @@ class RequestPausedHandler:
         pass
 
 
-    # TODO:
-    # should it be `response_status_code` or `response_code`?
-    # should it be `response_status_text` or `response_phrase`?
     async def continue_response(self, ev: cdp.fetch.RequestPaused):
         """resume the response flow with minimal interference.
 
         can be overridden to rewrite headers or status before forwarding.
 
         :param ev: interception event carrying response metadata.
+
+        expected `ev` state:
+        - `request_id`: str
+        - `response_status_code`: int status to emit
+        - `response_status_text`: optional status text
+        - `response_headers`: optional `list[HeaderEntry]`
+        - `binary_response_headers`: optional `bytes` for raw headers
         """
         await self.tab.send(
             cdp.fetch.continue_response(

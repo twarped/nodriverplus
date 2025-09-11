@@ -55,7 +55,7 @@ class Manager:
         self._bound_task = None
         self._stop_handler = None
 
-    async def enqueue_crawl(self,
+    def enqueue_crawl(self,
         base: nodriver.Browser | nodriver.Tab,
         url: str,
         scrape_response_handler: ScrapeResponseHandler = None,
@@ -63,7 +63,7 @@ class Manager:
         crawl_result_handler: CrawlResultHandler = None,
         *,
         new_window = False,
-        scrape_bytes = True,
+        # scrape_bytes = True,
         navigation_timeout = 30,
         wait_for_page_load = True,
         page_load_timeout = 60,
@@ -77,7 +77,7 @@ class Manager:
         proxy_bypass_list: list[str] = None,
         origins_with_universal_network_access: list[str] = None,
     ):
-        # enqueue a crawl job (thread-safe queue)
+        """enqueue a crawl job (thread-safe queue)"""
         self.queue.put(ManagerJob(
             url=url,
             type_="crawl",
@@ -88,7 +88,7 @@ class Manager:
                 "depth": depth,
                 "crawl_result_handler": crawl_result_handler,
                 "new_window": new_window,
-                "scrape_bytes": scrape_bytes,
+                # "scrape_bytes": scrape_bytes,
                 "navigation_timeout": navigation_timeout,
                 "wait_for_page_load": wait_for_page_load,
                 "page_load_timeout": page_load_timeout,
@@ -104,10 +104,10 @@ class Manager:
             }
         ))
 
-    async def enqueue_scrape(self, 
+    def enqueue_scrape(self, 
         base: nodriver.Browser | nodriver.Tab,
         url: str,
-        scrape_bytes = True,
+        # scrape_bytes = True,
         scrape_response_handler: ScrapeResponseHandler | None = None,
         *,
         navigation_timeout = 30,
@@ -121,14 +121,14 @@ class Manager:
         proxy_bypass_list: list[str] = None,
         origins_with_universal_network_access: list[str] = None,
     ):
-        # enqueue a scrape job (thread-safe queue)
+        """enqueue a scrape job (thread-safe queue)"""
         self.queue.put(ManagerJob(
             url=url,
             type_="scrape",
             kwargs={
                 "base": base,
                 "url": url,
-                "scrape_bytes": scrape_bytes,
+                # "scrape_bytes": scrape_bytes,
                 "scrape_response_handler": scrape_response_handler,
                 "navigation_timeout": navigation_timeout,
                 "wait_for_page_load": wait_for_page_load,

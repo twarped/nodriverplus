@@ -22,24 +22,22 @@ async def main():
     ndp = NodriverPlus()
     await ndp.start()
 
-    manager = Manager(ndp, concurrency=2)
-    manager.start()
-
     html_handler = HtmlPreviewHandler()
     result_handler = ResultPrinter()
 
     # enqueue two crawls and a scrape
-    await manager.enqueue_crawl(START_URL, scrape_response_handler=html_handler, crawl_result_handler=result_handler)
-    await manager.enqueue_crawl(START_URL, scrape_response_handler=html_handler, crawl_result_handler=result_handler)
-    await manager.enqueue_scrape(START_URL, scrape_response_handler=html_handler)
+    ndp.enqueue_crawl(START_URL, scrape_response_handler=html_handler, crawl_result_handler=result_handler)
+    ndp.enqueue_crawl(START_URL, scrape_response_handler=html_handler, crawl_result_handler=result_handler)
+    ndp.enqueue_scrape(START_URL, scrape_response_handler=html_handler)
 
     # wait for queue to drain
-    await manager.wait_for_queue()
+    await ndp.wait_for_queue()
     # stop manager and collect unfinished jobs (should be empty)
-    leftover = await manager.stop()
+    leftover = await ndp.stop_manager()
     if leftover:
         print(f"unfinished {len(leftover)} jobs persisted")
 
+    # ndp.stop() also stops the manager, but you get the idea
     await ndp.stop()
 
 if __name__ == "__main__":

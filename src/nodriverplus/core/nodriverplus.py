@@ -12,6 +12,7 @@ definitely still needs work tho
 """
 import logging
 from os import PathLike
+import os
 import nodriver
 from nodriver import Config
 from .user_agent import *
@@ -19,7 +20,7 @@ from .scrape_response import *
 from .tab import get, get_user_agent, scrape, crawl, get_with_timeout
 from .browser import get, stop
 from .manager import Manager
-from .handlers import TargetInterceptor, TargetInterceptorManager
+from .handlers import TargetInterceptor, TargetInterceptorManager, NetworkWatcher
 from .handlers.stock import (
     UserAgentPatch, 
     patch_user_agent,
@@ -53,7 +54,10 @@ class NodriverPlus:
         user_agent: UserAgent = None, 
         hide_headless: bool = True, 
         solve_cloudflare: bool = True,
+        *,
+        save_annotated_screenshot: str | os.PathLike = None,
         interceptors: list[TargetInterceptor] = None,
+        network_watchers: list[NetworkWatcher] = None,
         manager_concurrency: int = 1,
     ):
         """initialize a `NodriverPlus` instance
@@ -68,11 +72,11 @@ class NodriverPlus:
         self.user_agent = user_agent
         self.hide_headless = hide_headless
         # init interceptor manager and add provided + stock interceptors
-        interceptor_manager = TargetInterceptorManager(interceptors)
+        interceptor_manager = TargetInterceptorManager(interceptors, network_watchers)
         if user_agent:
             interceptor_manager.interceptors.append(UserAgentPatch(user_agent, hide_headless))
         if solve_cloudflare:
-            interceptor_manager.interceptors.append(CloudflareSolver())
+            interceptor_manager.network_watchers.append(CloudflareSolver(save_annotated_screenshot))
         self.interceptor_manager = interceptor_manager
         # dedicated queue manager (jobs provide their own per-job crawl/scrape concurrency)
         self.manager = Manager(concurrency=manager_concurrency)
@@ -191,7 +195,7 @@ class NodriverPlus:
         crawl_result_handler: CrawlResultHandler = None,
         *,
         new_window = False,
-        scrape_bytes = True,
+        # scrape_bytes = True,
         navigation_timeout = 30,
         wait_for_page_load = True,
         page_load_timeout = 60,
@@ -219,7 +223,6 @@ class NodriverPlus:
         :param crawl_result_handler: if specified, `crawl_result_handler.handle()` 
         will be called and awaited before returning the final `CrawlResult`.
         :param new_window: isolate crawl in new context+window when True.
-        :param scrape_bytes: capture bytes stream when possible.
         :param navigation_timeout: seconds for initial navigation phase.
         :param wait_for_page_load: await full load event.
         :param page_load_timeout: seconds for load phase.
@@ -232,6 +235,7 @@ class NodriverPlus:
         :return: crawl summary
         :rtype: CrawlResult
         """
+        # :param scrape_bytes: capture bytes stream when possible.
         # :param request_paused_handler: custom fetch interception handler.
         # **must be a type**—not an instance—so that it can be initiated later with the correct values attached
         # :type request_paused_handler: type[ScrapeRequestPausedHandler]
@@ -243,7 +247,7 @@ class NodriverPlus:
             depth=depth,
             crawl_result_handler=crawl_result_handler,
             new_window=new_window,
-            scrape_bytes=scrape_bytes,
+            # scrape_bytes=scrape_bytes,
             navigation_timeout=navigation_timeout,
             wait_for_page_load=wait_for_page_load,
             page_load_timeout=page_load_timeout,
@@ -258,7 +262,7 @@ class NodriverPlus:
 
     async def scrape(self, 
         url: str,
-        scrape_bytes = True,
+        # scrape_bytes = True,
         scrape_response_handler: ScrapeResponseHandler | None = None,
         *,
         navigation_timeout = 30,
@@ -289,7 +293,6 @@ class NodriverPlus:
         after the page loads, but before the `RequestPausedHandler` is removed
 
         :param url: target url.
-        :param scrape_bytes: capture non-text body bytes.
         :param scrape_response_handler: if specified, `scrape_response_handler.handle()` will be called 
         :param existing_tab: reuse provided tab/browser root or create fresh.
         and awaited before returning the final `ScrapeResponse`
@@ -305,6 +308,7 @@ class NodriverPlus:
         :return: html/links/bytes/metadata
         :rtype: ScrapeResponse
         """
+        # :param scrape_bytes: capture non-text body bytes.
         # :param request_paused_handler: custom fetch interception handler.
         # **must be a type**—not an instance—so that it can be initiated later with the correct values attached
         # :type request_paused_handler: type[ScrapeRequestPausedHandler]
@@ -312,7 +316,7 @@ class NodriverPlus:
         return await scrape(
             base=self.browser,
             url=url,
-            scrape_bytes=scrape_bytes,
+            # scrape_bytes=scrape_bytes,
             scrape_response_handler=scrape_response_handler,
             navigation_timeout=navigation_timeout,
             wait_for_page_load=wait_for_page_load,
@@ -416,25 +420,26 @@ class NodriverPlus:
         :param graceful: wait for underlying process to exit.
         """
         await self.manager.stop()
+        await self.interceptor_manager.stop()
         await stop(self.browser, graceful)
 
 
-    async def enqueue_crawl(self, *args, **kwargs):
-        """enqueue a crawl job using internal `Manager`.
+    def enqueue_crawl(self, *args, **kwargs):
+        """enqueue a crawl job using the internal `Manager`.
 
-        the browser must be started; auto-starts manager loop on first use.
-        first positional argument must be the root url (mirrors Manager.enqueue_crawl minus base).
+        auto-starts manager loop on first use if not already running.
+        first positional argument must be the seed url.
         """
         if not self.browser:
             raise RuntimeError("browser not started")
         # manager expects (base, url, ...)
         if self.manager._runner_task is None:
             self.manager.start()
-        return await self.manager.enqueue_crawl(self.browser, *args, **kwargs)
+        self.manager.enqueue_crawl(self.browser, *args, **kwargs)
 
 
-    async def enqueue_scrape(self, *args, **kwargs):
-        """enqueue a scrape job using internal `Manager`.
+    def enqueue_scrape(self, *args, **kwargs):
+        """enqueue a scrape job using the internal `Manager`.
 
         auto-starts manager loop on first use if not already running.
         first positional argument must be the target url.
@@ -443,7 +448,7 @@ class NodriverPlus:
             raise RuntimeError("browser not started")
         if self.manager._runner_task is None:
             self.manager.start()
-        return await self.manager.enqueue_scrape(self.browser, *args, **kwargs)
+        self.manager.enqueue_scrape(self.browser, *args, **kwargs)
 
 
     async def wait_for_queue(self, timeout: float | None = None):

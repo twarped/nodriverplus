@@ -67,6 +67,8 @@ class ScrapeResponse:
     :param intercepted_requests: map of url->ScrapeRequestIntercepted.
     :param redirect_chain: ordered list of redirect target locations (raw values from Location headers).
     :param elapsed: timedelta duration of the scrape.
+    :param current_depth: mostly used by `crawl()` to pass on to handlers:
+    depth of this scrape in the overall crawl (0 = seed).
     """
     url: str
     tab: nodriver.Tab
@@ -83,6 +85,7 @@ class ScrapeResponse:
     intercepted_requests: dict[str, ScrapeRequestIntercepted]
     redirect_chain: list[str]
     elapsed: timedelta | None
+    current_depth: int = 0
     def __init__(self, 
         url: str = None, 
         tab: nodriver.Tab = None, 
@@ -96,8 +99,27 @@ class ScrapeResponse:
         intercepted_responses: dict[str, ScrapeResponseIntercepted] = {},
         intercepted_requests: dict[str, ScrapeRequestIntercepted] = {},
         redirect_chain: list[str] = [],
-        elapsed: timedelta | None = None
+        elapsed: timedelta | None = None,
+        current_depth: int = 0
     ):
+        """
+        :param url: final (or initial) url of the page.
+        :param tab: underlying nodriver.Tab used for the scrape.
+        :param timed_out: overall timeout flag (true if any phase timed out initially).
+        :param timed_out_navigating: navigation phase timed out.
+        :param timed_out_loading: load event phase timed out.
+        :param html: captured html ("" when load timeout + outerHTML fallback failed).
+        :param `bytes_`: raw body bytes (only for non-text types when streamed).
+        :param mime: mime of main response.
+        :param headers: main response headers (lowercased keys).
+        :param intercepted_responses: map of url->ScrapeResponseIntercepted.
+        :param intercepted_requests: map of url->ScrapeRequestIntercepted.
+        :param redirect_chain: ordered list of redirect target locations (raw values from Location headers).
+        :param elapsed: timedelta duration of the scrape.
+        :param current_depth: mostly used by `crawl()` to pass on to handlers:
+        depth of this scrape in the overall crawl (0 = seed).
+        """
+
         self.url = url
         self.tab = tab
         self.timed_out = timed_out
@@ -111,6 +133,7 @@ class ScrapeResponse:
         self.intercepted_requests = intercepted_requests
         self.redirect_chain = redirect_chain
         self.elapsed = elapsed
+        self.current_depth = current_depth
 
 
 class ScrapeResponseHandler:
@@ -118,6 +141,8 @@ class ScrapeResponseHandler:
 
     override or pass callables into __init__ to customize behavior (html parsing, bytes processing,
     timeout handling, link extraction). all main methods must be async.
+
+    `scrape_response` is mutable, so beware.
     """
 
     async def timed_out(self, scrape_response: ScrapeResponse) -> list[str] | None:
@@ -125,7 +150,7 @@ class ScrapeResponseHandler:
 
         return list of links (rare) or None to skip expansion.
 
-        :param scrape_response: partial response (likely missing html/bytes).
+        :param scrape_response: partial response (likely missing html/bytes). (mutable)
         :return: optional new links.
         """
         pass
@@ -136,7 +161,7 @@ class ScrapeResponseHandler:
 
         mutate scrape_response as needed (parse, annotate, store state).
 
-        :param scrape_response: response object.
+        :param scrape_response: response object. (mutable)
         """
         pass
 
@@ -144,17 +169,17 @@ class ScrapeResponseHandler:
     async def bytes_(self, scrape_response: ScrapeResponse):
         """process raw bytes when non-text main response was streamed.
 
-        :param scrape_response: response object.
+        :param scrape_response: response object. (mutable)
         """
         pass
 
 
-    async def links(self, scrape_response: ScrapeResponse) -> list[str]:
+    async def links(self, scrape_response: ScrapeResponse) -> list[str] | None:
         """return list of links for crawler expansion.
 
         default: existing extracted links.
 
-        :param scrape_response: response object.
+        :param scrape_response: response object. (mutable)
         :return: list of links to continue crawl with.
         """
         return scrape_response.links
@@ -169,7 +194,7 @@ class ScrapeResponseHandler:
 
         or: `html()` -> `bytes_()` -> `links()`
 
-        :param scrape_response: scrape response object
+        :param scrape_response: scrape response object (mutable).
         :return: list of links to continue crawl with.
         :rtype: list[str] | None
         """

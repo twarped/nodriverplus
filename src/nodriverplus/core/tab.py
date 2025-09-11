@@ -1,3 +1,8 @@
+"""
+**TODO**:
+- move request paused handlers to `TargetInterceptorManager` probably
+"""
+
 import logging
 import asyncio
 import json
@@ -22,7 +27,6 @@ from .scrape_response import (
 )
 # from .pause_handlers import ScrapeRequestPausedHandler
 from .user_agent import UserAgent
-from . import cloudflare
 from .browser import get, get_with_timeout
 
 logger = logging.getLogger("nodriverplus.tab")
@@ -92,7 +96,7 @@ async def crawl(
     crawl_result_handler: CrawlResultHandler = None,
     *,
     new_window = False,
-    scrape_bytes = True,
+    # scrape_bytes = True,
     navigation_timeout = 30,
     wait_for_page_load = True,
     page_load_timeout = 60,
@@ -128,7 +132,6 @@ async def crawl(
     :param crawl_result_handler: if specified, `crawl_result_handler.handle()` 
     will be called and awaited before returning the final `CrawlResult`.
     :param new_window: isolate crawl in new context+window when True.
-    :param scrape_bytes: capture bytes stream when possible.
     :param navigation_timeout: seconds for initial navigation phase.
     :param wait_for_page_load: await full load event.
     :param page_load_timeout: seconds for load phase.
@@ -144,6 +147,7 @@ async def crawl(
     :return: crawl summary
     :rtype: CrawlResult
     """
+    # :param scrape_bytes: capture bytes stream when possible.
     # :param request_paused_handler: custom fetch interception handler.
     # **must be a type**—not an instance—so that it can be initiated later with the correct values attached
     # :type request_paused_handler: type[ScrapeRequestPausedHandler]
@@ -259,7 +263,7 @@ async def crawl(
                 scrape_response = await scrape(
                     base=instance,
                     url=current_url,
-                    scrape_bytes=scrape_bytes,
+                    # scrape_bytes=scrape_bytes,
                     scrape_response_handler=scrape_response_handler,
                     navigation_timeout=navigation_timeout,
                     wait_for_page_load=wait_for_page_load,
@@ -270,6 +274,7 @@ async def crawl(
                     proxy_server=proxy_server,
                     proxy_bypass_list=proxy_bypass_list,
                     origins_with_universal_network_access=origins_with_universal_network_access,
+                    current_depth=current_depth,
                 )
                 pages_processed += 1
                 # determine final canonical URL (after redirects)
@@ -283,19 +288,15 @@ async def crawl(
                     if final_url in processed_final_urls:
                         logger.debug("skip duplicate final url %s (source %s)", final_url, current_url)
                     else:
-                        try:
-                            links = await scrape_response_handler.handle(scrape_response) or []
-                        except Exception as e:
-                            error_obj = e
-                            failed_links.append(FailedLink(current_url, scrape_response.timed_out_navigating, error_obj))
-                            logger.exception("failed running handler for %s:", current_url)
-                        else:
-                            processed_final_urls.add(final_url)
-                            async with lock:
-                                if final_url not in all_links_set:
-                                    all_links_set.add(final_url)
-                                    all_links.append(final_url)
-                            successful_links.append(final_url)
+                        # handler already executed inside scrape(); collect links + finalize bookkeeping
+                        processed_final_urls.add(final_url)
+                        async with lock:
+                            if final_url not in all_links_set:
+                                all_links_set.add(final_url)
+                                all_links.append(final_url)
+                        successful_links.append(final_url)
+                        # adopt links extracted / supplied by handler
+                        links = scrape_response.links or []
 
                 if collect_responses and scrape_response:
                     async with lock:
@@ -393,7 +394,7 @@ async def crawl(
 async def scrape( 
     base: nodriver.Tab | nodriver.Browser,
     url: str,
-    scrape_bytes = True,
+    # scrape_bytes = True,
     scrape_response_handler: ScrapeResponseHandler | None = None,
     *,
     navigation_timeout = 30,
@@ -406,6 +407,7 @@ async def scrape(
     proxy_server: str = None,
     proxy_bypass_list: list[str] = None,
     origins_with_universal_network_access: list[str] = None,
+    current_depth: int = 0,
 ):
     """single page scrape (html + optional bytes + link extraction).
 
@@ -413,7 +415,7 @@ async def scrape(
     cleanup (tab closure, pending task draining).
 
     if `scrape_response_handler` is provided, `scrape_response_handler.handle()` will
-    be called and awaited before returning the final `ScrapeResponse`.
+    be called exactly once and awaited before returning the final `ScrapeResponse`.
 
     - **`proxy_server`** — (EXPERIMENTAL) (Optional) Proxy server, similar to the one passed to --proxy-server
     - **`proxy_bypass_list`** — (EXPERIMENTAL) (Optional) Proxy bypass list, similar to the one passed to --proxy-bypass-list
@@ -437,6 +439,7 @@ async def scrape(
     :param proxy_server: (EXPERIMENTAL) (Optional) Proxy server, similar to the one passed to --proxy-server
     :param proxy_bypass_list: (EXPERIMENTAL) (Optional) Proxy bypass list, similar to the one passed to --proxy-bypass-list
     :param origins_with_universal_network_access: (EXPERIMENTAL) (Optional) An optional list of origins to grant unlimited cross-origin access to. Parts of the URL other than those constituting origin are ignored.
+    :param current_depth: mostly used by `crawl()` to pass current depth to handlers.
     :return: html/links/bytes/metadata
     :rtype: ScrapeResponse
     """
@@ -448,7 +451,7 @@ async def scrape(
     start = time.monotonic()
     url = fix_url(url)
 
-    scrape_response = ScrapeResponse(url)
+    scrape_response = ScrapeResponse(url, current_depth=current_depth)
     parsed_url = urlparse(url)
 
     # central acquisition
@@ -505,8 +508,6 @@ async def scrape(
                 raise scrape_response.html
             # use the final URL as the base for extracting links
             scrape_response.links = extract_links(scrape_response.html, scrape_response.url)
-            if cloudflare.should_wait(scrape_response.html):
-                logger.info("detected potentially interactable cloudflare challenge in %s", url)
             scrape_response.elapsed = timedelta(seconds=time.monotonic() - start)
             elapsed_seconds = scrape_response.elapsed.total_seconds()
             logger.info("successfully finished scrape for %s (elapsed=%.2fs)", url, elapsed_seconds)
@@ -521,8 +522,9 @@ async def scrape(
     finally:
         # run handler + teardown before possibly closing the tab
         if scrape_response_handler:
+            # run handler only if links not already populated to avoid double execution under crawl()
             try:
-                await scrape_response_handler.handle(scrape_response)
+                scrape_response.links = await scrape_response_handler.handle(scrape_response)
             except Exception:
                 logger.exception("error running scrape_response_handler for %s", url)
         # await request_paused_handler.stop()

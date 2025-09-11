@@ -1,13 +1,24 @@
 import asyncio
+import websockets
 import logging
-from typing import Awaitable, Callable
 from nodriver import cdp, Tab, Connection, Browser
-import nodriver
 from ..cdp_helpers import can_use_domain
 
 logger = logging.getLogger("nodriverplus.TargetInterceptorManager")
 
 class NetworkWatcher:
+    """base class for a network watcher managed by `TargetInterceptorManager`
+
+    override methods to handle different CDP network events.
+
+    **NOTE**: this class is tied closely to `TargetInterceptorManager` and
+    is not useful on its own.
+    
+    **TODO**:
+    - add `on_loading_finished`?
+    - add `on_data_received`?
+    - make it less convoluted probably.
+    """
 
     async def on_response(self, 
         tab: Tab,
@@ -70,6 +81,10 @@ class NetworkWatcher:
         """
         pass
 
+    async def stop(self):
+        """hook for stopping/cleaning up the watcher if needed"""
+        pass
+
 
 class TargetInterceptor:
     """base class for a target interceptor
@@ -110,24 +125,28 @@ class TargetInterceptorManager:
 
     def __init__(self, 
         session: Tab | Connection | Browser = None, 
-        interceptors: list[TargetInterceptor] = [],
-        response_received_handlers: list[NetworkWatcher] = []
+        interceptors: list[TargetInterceptor] = None,
+        network_watchers: list[NetworkWatcher] = None
     ):
         """init TargetInterceptorManager
 
         for now, each `TargetInterceptorManager` can only have one session
+
         :param session: the session that you want to add `TargetInterceptor`'s to.
         :param interceptors: a list of `TargetInterceptor`'s to add to the manager.
+        :param network_watchers: a list of `NetworkWatcher`'s to add to the manager.
         """
         self.connection = session.connection if isinstance(session, Browser) else session
         self.interceptors = interceptors or []
-        self.response_received_handlers = response_received_handlers
+        self.network_watchers = network_watchers or []
         self.request_ids_to_tab: dict[str, Tab] = {}
         self.request_sent_events: dict[str, cdp.network.RequestWillBeSent] = {}
         self.response_received_events: dict[str, cdp.network.ResponseReceived] = {}
         self.responses_extra_info: dict[str, cdp.network.ResponseReceivedExtraInfo] = {}
         self.requests_extra_info: dict[str, cdp.network.RequestWillBeSentExtraInfo] = {}
         self.target_id_to_connection: dict[str, Tab | Connection] = {}
+        # lifecycle control
+        self._stopped = False
 
 
     async def set_hook(
@@ -147,7 +166,7 @@ class TargetInterceptorManager:
         ]
 
         if ev:
-            msg = f"{ev.target_info.type_} <{ev.target_info.url}>"
+            msg = f"failed to enable network for {ev.target_info.type_} <{ev.target_info.url}>:"
             session_id = ev.session_id
             # service workers will show up twice if allowed to populate on Page events
             if ev.target_info.type_ == "page":
@@ -157,10 +176,9 @@ class TargetInterceptorManager:
                     await connection.send(cdp.network.enable(), session_id)
                 except Exception as e:
                     if "-32001" in str(e):
-                        logger.warning("failed to enable network for %s: session not found. (potential timing issue?)", msg)
+                        logger.warning("%s session not found. (potential timing issue?)", msg)
                     else:
-                        logger.exception("failed to enable network for %s:", msg)
-
+                        logger.exception(msg)
         else:
             msg = connection
             session_id = None
@@ -175,12 +193,13 @@ class TargetInterceptorManager:
             ), session_id)
             logger.debug("successfully set auto attach for %s", msg)
         except Exception as e:
+            msg = f"failed to set auto attach for {msg}:"
             if "-32001" in str(e):
-                logger.warning("failed to set auto attach for %s: session not found. (potential timing issue?)", msg)
+                logger.warning("%s session not found. (potential timing issue?)", msg)
             elif "-32601" in str(e):
-                logger.warning("failed to set auto attach for %s: method not found", msg)
+                logger.warning("%s method not found", msg)
             else:
-                logger.exception("failed to set auto attach for %s:", msg)
+                logger.exception(msg)
 
 
     # `target_id` and `frame_id` are the same for tabs
@@ -188,33 +207,108 @@ class TargetInterceptorManager:
     # we can find the tab like this: 
     # (if `None`, it probably doesn't matter)
     async def on_response_received(self, ev: cdp.network.ResponseReceived):
+        """CDP handler fired when a network response is received.
+
+        passes the event to all `NetworkWatcher.on_response` handlers.
+        """
+        if self._stopped:
+            return
         tab = next((t for t in self.connection.browser.tabs if t.target_id == ev.frame_id), None)
         if tab is None:
             logger.debug("no tab found for ResponseReceived <%s> with target_id %s", ev.response.url, ev.frame_id)
             return
-        for handler in self.response_received_handlers:
-            await handler.on_response(tab, ev, self.responses_extra_info.get(ev.request_id))
+        for handler in self.network_watchers:
+            msg = f"failed to run network watcher (on_response) {handler} for request_id {ev.request_id}:"
+            try:
+                await handler.on_response(tab, ev, self.responses_extra_info.get(ev.request_id))
+            except websockets.exceptions.ConnectionClosedOK:
+                logger.debug("%s target already moved/closed", msg)
+            except websockets.exceptions.ConnectionClosedError:
+                logger.debug("%s target already moved/closed", msg)
+            except websockets.exceptions.InvalidStatus:
+                logger.debug("%s target already moved/closed", msg)
+            except Exception as e:
+                if "-32000" in str(e):
+                    logger.warning("%s execution context not created yet", msg)
+                elif "-32001" in str(e):
+                    logger.warning("%s session not found. (potential timing issue?)", msg)
+                elif "-32601" in str(e):
+                    logger.debug("%s method not found", msg)
+                else:
+                    logger.exception(msg)
         self.responses_extra_info.pop(ev.request_id, None)
 
 
     async def on_loading_failed(self, ev: cdp.network.LoadingFailed):
+        """CDP handler fired when a network request fails to load.
+
+        passes the event to all `NetworkWatcher.on_loading_failed` handlers.
+        """
+        if self._stopped:
+            return
         tab = self.request_ids_to_tab.get(ev.request_id)
         if tab is None:
             logger.debug("no tab found for LoadingFailed with request_id %s", ev.request_id)
             return
 
-        for handler in self.response_received_handlers:
-            await handler.on_loading_failed(tab, ev, self.request_sent_events.get(ev.request_id))
+        for handler in self.network_watchers:
+            msg = f"failed to run network watcher (on_loading_failed) {handler} for request_id {ev.request_id}:"
+            try:
+                await handler.on_loading_failed(tab, ev, self.request_sent_events.get(ev.request_id))
+            except websockets.exceptions.ConnectionClosedOK:
+                logger.debug("%s target already moved/closed", msg)
+            except websockets.exceptions.ConnectionClosedError:
+                logger.debug("%s target already moved/closed", msg)
+            except websockets.exceptions.InvalidStatus:
+                logger.debug("%s target already moved/closed", msg)
+            except Exception as e:
+                if "-32000" in str(e):
+                    logger.warning("%s execution context not created yet", msg)
+                elif "-32001" in str(e):
+                    logger.warning("%s session not found. (potential timing issue?)", msg)
+                elif "-32601" in str(e):
+                    logger.debug("%s method not found", msg)
+                else:
+                    logger.exception(msg)
         self.request_ids_to_tab.pop(ev.request_id, None)
 
 
     async def on_response_received_extra_info(self, ev: cdp.network.ResponseReceivedExtraInfo):
+        """CDP handler fired when extra information about a network response is received.
+
+        passes the event to all `NetworkWatcher.on_response_extra_info` handlers.
+        """
+        if self._stopped:
+            return
         self.responses_extra_info[ev.request_id] = ev
-        for handler in self.response_received_handlers:
-            await handler.on_response_extra_info(ev)
+        for handler in self.network_watchers:
+            msg = f"failed to run network watcher (on_response_extra_info) {handler} for request_id {ev.request_id}:"
+            try:
+                await handler.on_response_extra_info(ev)
+            except websockets.exceptions.ConnectionClosedOK:
+                logger.debug("%s target already moved/closed", msg)
+            except websockets.exceptions.ConnectionClosedError:
+                logger.debug("%s target already moved/closed", msg)
+            except websockets.exceptions.InvalidStatus:
+                logger.debug("%s target already moved/closed", msg)
+            except Exception as e:
+                if "-32000" in str(e):
+                    logger.warning("%s execution context not created yet", msg)
+                elif "-32001" in str(e):
+                    logger.warning("%s session not found. (potential timing issue?)", msg)
+                elif "-32601" in str(e):
+                    logger.debug("%s method not found", msg)
+                else:
+                    logger.exception(msg)
 
 
     async def on_request_will_be_sent(self, ev: cdp.network.RequestWillBeSent):
+        """CDP handler fired when a network request is about to be sent.
+
+        passes the event to all `NetworkWatcher.on_request` handlers.
+        """
+        if self._stopped:
+            return
         tab = next((t for t in self.connection.browser.tabs if t.target_id == ev.frame_id), None)
         if tab is None:
             logger.debug("no tab found for RequestWillBeSent <%s> with target_id %s", ev.request.url, ev.frame_id)
@@ -222,14 +316,20 @@ class TargetInterceptorManager:
         self.request_ids_to_tab[ev.request_id] = tab
         # store the request event so LoadingFailed handlers can access original url
         self.request_sent_events[ev.request_id] = ev
-        for handler in self.response_received_handlers:
+        for handler in self.network_watchers:
             await handler.on_request(tab, ev, self.requests_extra_info.get(ev.request_id))
         self.requests_extra_info.pop(ev.request_id, None)
 
     
     async def on_request_will_be_sent_extra_info(self, ev: cdp.network.RequestWillBeSentExtraInfo):
+        """CDP handler fired when extra information about a network request is received.
+
+        passes the event to all `NetworkWatcher.on_request_extra_info` handlers.
+        """
+        if self._stopped:
+            return
         self.requests_extra_info[ev.request_id] = ev
-        for handler in self.response_received_handlers:
+        for handler in self.network_watchers:
             await handler.on_request_extra_info(ev)
 
 
@@ -242,26 +342,30 @@ class TargetInterceptorManager:
 
         :param ev: the event to pass to the interceptors.
         """
+        if self._stopped:
+            return
         target_msg = f"{ev.target_info.type_} <{ev.target_info.url}>"
         connection = self.target_id_to_connection.get(ev.target_info.target_id) or self.connection
         for interceptor in self.interceptors:
-            msg = f"{interceptor} to {target_msg}"
+            msg = f"failed to apply interceptor (on_change) {interceptor} to {target_msg}:"
             try:
                 ev.session_id = None
                 await interceptor.on_change(connection, ev)
+            except websockets.exceptions.ConnectionClosedOK:
+                logger.debug("%s target already moved/closed", msg)
+            except websockets.exceptions.ConnectionClosedError:
+                logger.debug("%s target already moved/closed", msg)
+            except websockets.exceptions.InvalidStatus:
+                logger.debug("%s target already moved/closed", msg)
             except Exception as e:
-                if "server rejected WebSocket connection: HTTP 500" in str(e):
-                    # debug since target changes may be because the target was closed
-                    logger.debug("failed to apply interceptor (on_change) %s: target already moved/closed", msg)
-                elif "-32000" in str(e):
-                    logger.warning("failed to apply interceptor (on_change) %s: execution context not created yet", msg)
+                if "-32000" in str(e):
+                    logger.warning("%s execution context not created yet", msg)
                 elif "-32001" in str(e):
-                    logger.warning("failed to apply interceptor (on_change) %s: session not found. (potential timing issue?)", msg)
+                    logger.warning("%s session not found. (potential timing issue?)", msg)
                 elif "-32601" in str(e):
-                    # same here
-                    logger.debug("failed to apply interceptor (on_change) %s: method not found", msg)
-                else: 
-                    logger.exception("failed to apply interceptor (on_change) %s:", msg)
+                    logger.debug("%s method not found", msg)
+                else:
+                    logger.exception(msg)
 
 
     async def interceptors_on_attach(
@@ -280,6 +384,8 @@ class TargetInterceptorManager:
             target_msg = f"tab <{self.connection.url}>"
         else:
             target_msg = f"connection <{self.connection}>"
+        if self._stopped:
+            return
         for interceptor in self.interceptors:
             if ev:
                 msg = f"{interceptor} to {target_msg}"
@@ -289,12 +395,13 @@ class TargetInterceptorManager:
                 logger.debug("applying interceptor (on_attach) %s", msg)
                 await interceptor.on_attach(self.connection, ev)
             except Exception as e:
+                msg = f"failed to apply interceptor (on_attach) {msg}:"
                 if "-32000" in str(e):
-                    logger.warning("failed to apply interceptor (on_attach) %s: execution context not created yet", msg)
+                    logger.warning("%s execution context not created yet", msg)
                 elif "-32001" in str(e):
-                    logger.warning("failed to apply interceptor (on_attach) %s: session not found. (potential timing issue?)", msg)
+                    logger.warning("%s session not found. (potential timing issue?)", msg)
                 else: 
-                    logger.exception("failed to apply interceptor (on_attach) %s:", msg)
+                    logger.exception(msg)
 
 
     async def on_attach(
@@ -307,6 +414,8 @@ class TargetInterceptorManager:
 
         :param ev: CDP AttachedToTarget event.
         """
+        if self._stopped:
+            return
         connection = self.connection
 
         if ev is not None:
@@ -370,3 +479,31 @@ class TargetInterceptorManager:
             self.on_request_will_be_sent_extra_info
         )
         await self.set_hook(None)
+
+    async def stop(self):
+        """stop all background tasks
+
+        remove handlers and stop all created 
+        subprocesses/threads if available.
+        """
+        if self._stopped:
+            return
+        self._stopped = True
+        # remove handlers we previously added to avoid further callback dispatch after websocket closes
+        c = self.connection
+        c.remove_handler(cdp.target.AttachedToTarget, self.on_attach)
+        c.remove_handler(cdp.target.TargetInfoChanged, self.interceptors_on_change)
+        c.remove_handler(cdp.network.ResponseReceived, self.on_response_received)
+        c.remove_handler(cdp.network.ResponseReceivedExtraInfo, self.on_response_received_extra_info)
+        c.remove_handler(cdp.network.LoadingFailed, self.on_loading_failed)
+        c.remove_handler(cdp.network.RequestWillBeSent, self.on_request_will_be_sent)
+        c.remove_handler(cdp.network.RequestWillBeSentExtraInfo, self.on_request_will_be_sent_extra_info)
+        
+        for watcher in self.network_watchers:
+            try:
+                # support both sync and async `stop()` implementations
+                res = watcher.stop()
+                if asyncio.iscoroutine(res):
+                    await res
+            except Exception:
+                logger.exception("error stopping watcher %s", watcher)

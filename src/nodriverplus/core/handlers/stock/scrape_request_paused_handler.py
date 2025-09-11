@@ -3,6 +3,9 @@
 
 figure out why intercepting the original request triggers cloudflare
 and prevents you from receiving a `cf_clearance` token.
+
+maybe it has to do with `Network.requestWillBeSentExtraInfo` having
+extra headers that aren't provided by `Network.RequestPaused`?
 """
 
 import logging
