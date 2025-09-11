@@ -237,24 +237,26 @@ class TargetInterceptorManager:
         ]
 
         if ev:
-            msg = f"failed to enable network for {ev.target_info.type_} <{ev.target_info.url}>:"
+            msg = f"{ev.target_info.type_} <{ev.target_info.url}>"
             session_id = ev.session_id
             # service workers will show up twice if allowed to populate on Page events
             if ev.target_info.type_ == "page":
                 filters.append({"type": "service_worker", "exclude": True})
                 # network can only be enabled on page targets
+                network_msg = f"failed to enable network for {msg}:"
                 try:
                     await connection.send(cdp.network.enable(), session_id)
                 except Exception as e:
                     if "-32001" in str(e):
-                        logger.warning("%s session not found. (potential timing issue?)", msg)
+                        logger.warning("%s session not found. (potential timing issue?)", network_msg)
                     else:
-                        logger.exception(msg)
+                        logger.exception(network_msg)
         else:
             msg = connection
             session_id = None
         filters.append({})
 
+        attach_msg = f"failed to set auto attach for {msg}:"
         try:
             await connection.send(cdp.target.set_auto_attach(
                 auto_attach=True,
@@ -262,15 +264,16 @@ class TargetInterceptorManager:
                 flatten=True,
                 filter_=cdp.target.TargetFilter(filters)
             ), session_id)
-            logger.debug("successfully set auto attach for %s", msg)
+            logger.debug("successfully set auto attach for %s", attach_msg)
+        except websockets.exceptions.ConnectionClosedError:
+            logger.debug("%s browser already closed.", attach_msg)
         except Exception as e:
-            msg = f"failed to set auto attach for {msg}:"
             if "-32001" in str(e):
-                logger.warning("%s session not found. (potential timing issue?)", msg)
+                logger.warning("%s session not found. (potential timing issue?)", attach_msg)
             elif "-32601" in str(e):
-                logger.warning("%s method not found", msg)
+                logger.warning("%s method not found.", attach_msg)
             else:
-                logger.exception(msg)
+                logger.exception(attach_msg)
 
 
     # `target_id` and `frame_id` are the same for tabs
@@ -434,6 +437,8 @@ class TargetInterceptorManager:
         try:
             logger.debug("resuming %s (session_id=%s)", msg, session_id)
             await connection.send(cdp.runtime.run_if_waiting_for_debugger(), session_id)
+        except ConnectionRefusedError:
+            logger.debug("%s browser already closed.", msg)
         except Exception as e:
             if "-32001" in str(e):
                 logger.warning("session for %s not found. (potential timing issue?)", msg)

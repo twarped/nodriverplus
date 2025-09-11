@@ -12,7 +12,7 @@ import logging
 import nodriver
 
 from ..request_paused import RequestPausedHandler
-from ...scrape_response import ScrapeResponse, ScrapeResponseIntercepted, ScrapeRequestIntercepted
+from ...scrape_result import ScrapeResult, InterceptedResponseMeta, InterceptedRequestMeta
 import base64
 
 logger = logging.getLogger("nodriverplus.ScrapeRequestPausedHandler")
@@ -21,25 +21,25 @@ logger = logging.getLogger("nodriverplus.ScrapeRequestPausedHandler")
 class ScrapeRequestPausedHandler(RequestPausedHandler):
     """stock `RequestPausedHandler` created for `NodriverPlus.scrape()`
 
-    mutates `ScrapeResponse` during request/response interception.
+    mutates `ScrapeResult` during request/response interception.
 
-    also mutates `ScrapeResponse.bytes_` according to `should_take_response_body_as_stream()`.
+    also mutates `ScrapeResult.bytes_` according to `should_take_response_body_as_stream()`.
     """
 
     def __init__(self, 
         tab: nodriver.Tab, 
-        scrape_response: ScrapeResponse, 
+        result: ScrapeResult, 
         url: str,
         scrape_bytes: bool = True
     ):
         super().__init__(tab)
-        self.scrape_response = scrape_response
+        self.result = result
         self.url = url
         self.scrape_bytes = scrape_bytes
 
 
     async def on_response(self, ev):
-        scrape_response = self.scrape_response
+        result = self.result
         headers = {h.name.lower(): h.value for h in (ev.response_headers or [])}
         mime = None
         ct = headers.get("content-type", "")
@@ -47,21 +47,21 @@ class ScrapeRequestPausedHandler(RequestPausedHandler):
             mime = ct.split(";", 1)[0].lower().strip()
 
         if ev.request.url == self.url:
-            scrape_response.headers = headers
-            scrape_response.mime = mime
+            result.headers = headers
+            result.mime = mime
         
-        scrape_response.intercepted_responses[ev.request.url] = ScrapeResponseIntercepted(
+        result.intercepted_responses[ev.request.url] = InterceptedResponseMeta(
             ev.request.url,
             mime,
             headers,
             ev.request.method
         )
-        self.scrape_response = scrape_response
+        self.result = result
 
 
     async def on_request(self, ev):
         headers = ev.request.headers.to_json()
-        self.scrape_response.intercepted_requests[ev.request.url] = ScrapeRequestIntercepted(
+        self.result.intercepted_requests[ev.request.url] = InterceptedRequestMeta(
             ev.request.url,
             headers,
             ev.request.method
@@ -86,4 +86,8 @@ class ScrapeRequestPausedHandler(RequestPausedHandler):
     
 
     async def on_stream_finished(self, ev):
-        self.scrape_response.bytes_ = base64.b64decode(ev.body)
+        self.result.bytes_ = base64.b64decode(ev.body)
+
+
+# keep this disabled until the request interception issues are resolved.
+__all__ = []

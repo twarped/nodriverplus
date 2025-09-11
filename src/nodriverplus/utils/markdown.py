@@ -20,7 +20,7 @@ from html_to_markdown import convert_to_markdown
 
 from .html import parse_style_attribute, normalize_html
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("nodriverplus.utils.markdown")
 
 
 def _style_to_emphasis_converter(*, 

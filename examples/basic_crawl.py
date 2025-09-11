@@ -1,10 +1,10 @@
 import asyncio
-from nodriverplus import NodriverPlus, ScrapeResponseHandler
+from nodriverplus import NodriverPlus, ScrapeResultHandler
 
 START_URL = "https://example.com"
 
 # simple handler that prints html preview and returns links unchanged
-class ExampleHandler(ScrapeResponseHandler):
+class ExampleHandler(ScrapeResultHandler):
     async def html(self, response):  # type: ignore[override]
         print(response.html[:500])
     async def links(self, response):  # type: ignore[override]
@@ -16,7 +16,7 @@ async def main():
     ndp = NodriverPlus()
     await ndp.start()
     handler = ExampleHandler()
-    result = await ndp.crawl(START_URL, depth=2, scrape_response_handler=handler)
+    result = await ndp.crawl(START_URL, depth=2, scrape_result_handler=handler)
     print(f"crawl finished pages={len(result.successful_links)} failed={len(result.failed_links)}")
     await ndp.stop()
 

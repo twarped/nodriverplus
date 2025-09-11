@@ -11,14 +11,14 @@ keeps low-level access to the underlying nodriver Browser so callers can still d
 definitely still needs work tho
 """
 import logging
-from os import PathLike
 import os
 import nodriver
+from types import CoroutineType
 from nodriver import Config
 from .user_agent import *
-from .scrape_response import *
-from .tab import get, get_user_agent, scrape, crawl, get_with_timeout
-from .browser import get, stop
+from .scrape_result import *
+from .tab import get_user_agent, scrape, crawl
+from .browser import get, get_with_timeout, stop
 from .manager import Manager
 from .handlers import TargetInterceptor, TargetInterceptorManager, NetworkWatcher
 from .handlers.stock import (
@@ -87,9 +87,9 @@ class NodriverPlus:
         config: Config | None = None,
         *,
         window_size: tuple[int, int] | None = (1920, 1080),
-        user_data_dir: PathLike | None = None,
+        user_data_dir: os.PathLike | None = None,
         headless: bool | None = False,
-        browser_executable_path: PathLike | None = None,
+        browser_executable_path: os.PathLike | None = None,
         browser_args: list[str] | None = None,
         sandbox: bool | None = True,
         lang: str | None = None,
@@ -188,7 +188,7 @@ class NodriverPlus:
 
     async def crawl(self,
         url: str,
-        scrape_response_handler: ScrapeResponseHandler = None,
+        scrape_result_handler: ScrapeResultHandler = None,
         depth: int | None = 1,
         crawl_result_handler: CrawlResultHandler = None,
         *,
@@ -200,7 +200,7 @@ class NodriverPlus:
         extra_wait_ms = 0,
         concurrency: int = 1,
         max_pages: int | None = None,
-        collect_responses: bool = False,
+        collect_results: bool = False,
         delay_range: tuple[float, float] | None = None,
         # request_paused_handler: ScrapeRequestPausedHandler = None,
     ):
@@ -216,7 +216,7 @@ class NodriverPlus:
         instance.
 
         :param url: root starting point.
-        :param scrape_response_handler: optional `ScrapeResponseHandler` to be passed to `scrape()`
+        :param scrape_result_handler: optional `ScrapeResultHandler` to be passed to `scrape()`
         :param depth: max link depth (0 means single page).
         :param crawl_result_handler: if specified, `crawl_result_handler.handle()` 
         will be called and awaited before returning the final `CrawlResult`.
@@ -227,7 +227,7 @@ class NodriverPlus:
         :param extra_wait_ms: post-load settle time.
         :param concurrency: worker concurrency.
         :param max_pages: hard cap on processed pages.
-        :param collect_responses: store every ScrapeResponse object.
+        :param collect_results: store every ScrapeResult object.
         :param delay_range: (min,max) jitter before first scrape per worker loop.
         :param tab_close_timeout: seconds to wait closing a tab.
         :return: crawl summary
@@ -241,7 +241,7 @@ class NodriverPlus:
         return await crawl(
             self.browser,
             url=url,
-            scrape_response_handler=scrape_response_handler,
+            scrape_result_handler=scrape_result_handler,
             depth=depth,
             crawl_result_handler=crawl_result_handler,
             new_window=new_window,
@@ -252,7 +252,7 @@ class NodriverPlus:
             extra_wait_ms=extra_wait_ms,
             concurrency=concurrency,
             max_pages=max_pages,
-            collect_responses=collect_responses,
+            collect_results=collect_results,
             delay_range=delay_range,
             # request_paused_handler=request_paused_handler,
         )
@@ -261,7 +261,7 @@ class NodriverPlus:
     async def scrape(self, 
         url: str,
         # scrape_bytes = True,
-        scrape_response_handler: ScrapeResponseHandler | None = None,
+        scrape_result_handler: ScrapeResultHandler | None = None,
         *,
         navigation_timeout = 30,
         wait_for_page_load = True,
@@ -279,21 +279,21 @@ class NodriverPlus:
         handles navigation, timeouts, fetch interception, html capture, link parsing and
         cleanup (tab closure, pending task draining).
 
-        if `scrape_response_handler` is provided, `scrape_response_handler.handle()` will
-        be called and awaited before returning the final `ScrapeResponse`.
+        if `scrape_result_handler` is provided, `scrape_result_handler.handle()` will
+        be called and awaited before returning the final `ScrapeResult`.
 
         - **`proxy_server`** — (EXPERIMENTAL) (Optional) Proxy server, similar to the one passed to --proxy-server
         - **`proxy_bypass_list`** — (EXPERIMENTAL) (Optional) Proxy bypass list, similar to the one passed to --proxy-bypass-list
         - **`origins_with_universal_network_access`** — (EXPERIMENTAL) (Optional) An optional list of origins to grant unlimited cross-origin access to. Parts of the URL other than those constituting origin are ignored.
 
         ### not implemented yet:
-        - `scrape_response_handler` could be useful if you want to execute stuff on `tab`
+        - `scrape_result_handler` could be useful if you want to execute stuff on `tab`
         after the page loads, but before the `RequestPausedHandler` is removed
 
         :param url: target url.
-        :param scrape_response_handler: if specified, `scrape_response_handler.handle()` will be called 
+        :param scrape_result_handler: if specified, `scrape_result_handler.handle()` will be called 
         :param existing_tab: reuse provided tab/browser root or create fresh.
-        and awaited before returning the final `ScrapeResponse`
+        and awaited before returning the final `ScrapeResult`.
         :param navigation_timeout: seconds for initial navigation.
         :param wait_for_page_load: await full load event.
         :param page_load_timeout: seconds for load phase.
@@ -304,7 +304,7 @@ class NodriverPlus:
         :param proxy_bypass_list: (EXPERIMENTAL) (Optional) Proxy bypass list, similar to the one passed to --proxy-bypass-list
         :param origins_with_universal_network_access: (EXPERIMENTAL) (Optional) An optional list of origins to grant unlimited cross-origin access to. Parts of the URL other than those constituting origin are ignored.
         :return: html/links/bytes/metadata
-        :rtype: ScrapeResponse
+        :rtype: ScrapeResult
         """
         # :param scrape_bytes: capture non-text body bytes.
         # :param request_paused_handler: custom fetch interception handler.
@@ -315,7 +315,7 @@ class NodriverPlus:
             base=self.browser,
             url=url,
             # scrape_bytes=scrape_bytes,
-            scrape_response_handler=scrape_response_handler,
+            scrape_result_handler=scrape_result_handler,
             navigation_timeout=navigation_timeout,
             wait_for_page_load=wait_for_page_load,
             page_load_timeout=page_load_timeout,
@@ -338,10 +338,10 @@ class NodriverPlus:
         extra_wait_ms = 0,
         new_tab = False,
         new_window = False
-    ):
+    ) -> CoroutineType[any, any, ScrapeResult]:
         """navigate with separate navigation + load timeouts.
 
-        returns a partial ScrapeResponse (timing + timeout flags + tab ref)
+        returns a partial ScrapeResult (timing + timeout flags + tab ref)
 
         :param tab: existing tab or browser root.
         :param url: target url.
@@ -351,10 +351,10 @@ class NodriverPlus:
         :param extra_wait_ms: post-load wait for dynamic content.
         :param new_tab: request new tab first.
         :param new_window: request new window/context first.
-        :return: partial ScrapeResponse (timing + timeout flags).
-        :rtype: ScrapeResponse
+        :return: partial ScrapeResult (timing + timeout flags).
+        :rtype: ScrapeResult
         """
-        return await get_with_timeout(
+        return get_with_timeout(
             target=self.browser,
             url=url,
             navigation_timeout=navigation_timeout,
@@ -376,7 +376,7 @@ class NodriverPlus:
         proxy_server: str = None,
         proxy_bypass_list: list[str] = None,
         origins_with_universal_network_access: list[str] = None,
-    ) -> nodriver.Tab:
+    ):
         """central factory for new/reused tabs/windows/contexts.
 
         honors combinations of `new_window`/`new_tab`/`new_context` on `base`.
@@ -399,7 +399,7 @@ class NodriverPlus:
         :return: acquired/created tab
         :rtype: Tab
         """
-        return await get(
+        return get(
             base=self.browser,
             url=url,
             new_tab=new_tab,

@@ -7,7 +7,7 @@ from typing import Callable
 import nodriver
 
 # from .pause_handlers import ScrapeRequestPausedHandler
-from .scrape_response import ScrapeResponseHandler, CrawlResultHandler
+from .scrape_result import ScrapeResultHandler, CrawlResultHandler
 from .tab import crawl, scrape
 
 logger = logging.getLogger("nodriverplus.Manager")
@@ -25,6 +25,12 @@ class ManagerJob:
         self.kwargs = kwargs
 
 class Manager:
+    """manage a queue of crawl/scrape jobs with concurrency control.
+
+    no longer bound to a specific `NodriverPlus` instance;
+    each job must carry its own `base` (browser or tab).
+    """
+
     queue: _thread_queue.Queue
     concurrency: int
     _running: bool
@@ -37,6 +43,13 @@ class Manager:
     _stop_handler: Callable[[list[ManagerJob]], any] | None
 
     def __init__(self, concurrency: int = 1):
+        """manage a queue of crawl/scrape jobs with concurrency control.
+
+        no longer bound to a specific `NodriverPlus` instance;
+        each job must carry its own `base` (browser or tab).
+
+        :param concurrency: max number of simultaneous jobs (default 1).
+        """
         # now stateless w.r.t browser context; per-job base passed in enqueue.
         self.queue = _thread_queue.Queue()
         self.concurrency = concurrency
@@ -50,7 +63,7 @@ class Manager:
     def enqueue_crawl(self,
         base: nodriver.Browser | nodriver.Tab,
         url: str,
-        scrape_response_handler: ScrapeResponseHandler = None,
+        scrape_result_handler: ScrapeResultHandler = None,
         depth = 1,
         crawl_result_handler: CrawlResultHandler = None,
         *,
@@ -69,14 +82,25 @@ class Manager:
         proxy_bypass_list: list[str] = None,
         origins_with_universal_network_access: list[str] = None,
     ):
-        """enqueue a crawl job (thread-safe queue)"""
+        """enqueue a `crawl()` job
+        
+        mirror of `crawl()`, except that it's sync
+        and sends the crawl to a background queue.
+
+        **note:** returns `None` immediately. handlers
+        must be provided to receive results.
+
+        :return: returns immediately; results delivered via
+        `scrape_result_handler` and `crawl_result_handler`.
+        :rtype: None
+        """
         self.queue.put(ManagerJob(
             url=url,
             type_="crawl",
             kwargs={
                 "base": base,
                 "url": url,
-                "scrape_response_handler": scrape_response_handler,
+                "scrape_result_handler": scrape_result_handler,
                 "depth": depth,
                 "crawl_result_handler": crawl_result_handler,
                 "new_window": new_window,
@@ -100,7 +124,7 @@ class Manager:
         base: nodriver.Browser | nodriver.Tab,
         url: str,
         # scrape_bytes = True,
-        scrape_response_handler: ScrapeResponseHandler | None = None,
+        scrape_result_handler: ScrapeResultHandler | None = None,
         *,
         navigation_timeout = 30,
         wait_for_page_load = True,
@@ -113,7 +137,17 @@ class Manager:
         proxy_bypass_list: list[str] = None,
         origins_with_universal_network_access: list[str] = None,
     ):
-        """enqueue a scrape job (thread-safe queue)"""
+        """enqueue a `scrape()` job
+        
+        mirror of `scrape()`, except that it's sync
+        and sends the scrape to a background queue.
+
+        **note:** returns `None` immediately. a handler
+        must be provided to receive the result.
+
+        :return: returns immediately; result delivered via `scrape_result_handler`.
+        :rtype: None
+        """
         self.queue.put(ManagerJob(
             url=url,
             type_="scrape",
@@ -121,7 +155,7 @@ class Manager:
                 "base": base,
                 "url": url,
                 # "scrape_bytes": scrape_bytes,
-                "scrape_response_handler": scrape_response_handler,
+                "scrape_result_handler": scrape_result_handler,
                 "navigation_timeout": navigation_timeout,
                 "wait_for_page_load": wait_for_page_load,
                 "page_load_timeout": page_load_timeout,

@@ -2,13 +2,13 @@ import asyncio
 import logging
 from nodriverplus import (
     NodriverPlus,
-    ScrapeResponseHandler,
+    ScrapeResultHandler,
     CrawlResultHandler,
 )
 
 START_URL = "https://example.com"
 
-class HtmlPreviewHandler(ScrapeResponseHandler):
+class HtmlPreviewHandler(ScrapeResultHandler):
     async def handle(self, response):
         print(response.html[:120])
 
@@ -25,9 +25,9 @@ async def main():
     result_handler = ResultPrinter()
 
     # enqueue two crawls and a scrape
-    ndp.enqueue_crawl(START_URL, scrape_response_handler=html_handler, crawl_result_handler=result_handler)
-    ndp.enqueue_crawl(START_URL, scrape_response_handler=html_handler, crawl_result_handler=result_handler)
-    ndp.enqueue_scrape(START_URL, scrape_response_handler=html_handler)
+    ndp.enqueue_crawl(START_URL, scrape_result_handler=html_handler, crawl_result_handler=result_handler)
+    ndp.enqueue_crawl(START_URL, scrape_result_handler=html_handler, crawl_result_handler=result_handler)
+    ndp.enqueue_scrape(START_URL, scrape_result_handler=html_handler)
 
     # wait for queue to drain
     await ndp.wait_for_queue()

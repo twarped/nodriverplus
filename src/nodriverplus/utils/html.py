@@ -21,7 +21,7 @@ from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup, Tag, NavigableString
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("nodriverplus.utils.html")
 
 # constants
 INLINE_TAGS = {

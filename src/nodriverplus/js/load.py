@@ -1,7 +1,7 @@
 import logging
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("nodriverplus.js.load")
 
 def load_text(filename: str, encoding: str = "utf-8") -> str:
     # resolve path relative to this file to avoid relying on cwd

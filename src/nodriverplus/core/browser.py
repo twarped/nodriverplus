@@ -3,8 +3,8 @@ import asyncio
 import nodriver
 import time
 from datetime import timedelta
-from .scrape_response import (
-    ScrapeResponse, 
+from .scrape_result import (
+    ScrapeResult, 
 )
 
 logger = logging.getLogger("nodriverplus.browser")
@@ -84,7 +84,7 @@ async def get_with_timeout(
 ):
     """navigate with separate navigation + load timeouts.
 
-    returns a partial ScrapeResponse (timing + timeout flags + tab ref)
+    returns a partial ScrapeResult (timing + timeout flags + tab ref)
 
     :param tab: existing tab or browser root.
     :param url: target url.
@@ -94,10 +94,10 @@ async def get_with_timeout(
     :param extra_wait_ms: post-load wait for dynamic content.
     :param new_tab: request new tab first.
     :param new_window: request new window/context first.
-    :return: partial ScrapeResponse (timing + timeout flags).
-    :rtype: ScrapeResponse
+    :return: partial ScrapeResult (timing + timeout flags).
+    :rtype: ScrapeResult
     """
-    scrape_response = ScrapeResponse(url, target, True)
+    result = ScrapeResult(url=url, tab=target, timed_out=True)
 
     start = time.monotonic()
     # prepare target first when we need a new tab/window/context
@@ -118,12 +118,12 @@ async def get_with_timeout(
         # cancelling nav_task will cause throw an InvalidStateError
         # if the Transaction hasn't finished yet
         base = await asyncio.wait_for(asyncio.shield(nav_task), timeout=navigation_timeout)
-        scrape_response.tab = base
+        result.tab = base
     except asyncio.TimeoutError:
-        scrape_response.timed_out_navigating = True
-        scrape_response.elapsed = timedelta(seconds=time.monotonic() - start)
-        logger.warning("timed out getting %s (navigation phase) (elapsed=%.2fs)", url, scrape_response.elapsed.total_seconds())
-        return scrape_response
+        result.timed_out_navigating = True
+        result.elapsed = timedelta(seconds=time.monotonic() - start)
+        logger.warning("timed out getting %s (navigation phase) (elapsed=%.2fs)", url, result.elapsed.total_seconds())
+        return result
 
     if wait_for_page_load_:
         # avoid circular import at module import time by importing locally
@@ -136,9 +136,9 @@ async def get_with_timeout(
                 timeout=page_load_timeout + extra_wait_ms / 1000
             )
         except asyncio.TimeoutError:
-            scrape_response.timed_out_loading = True
-            scrape_response.elapsed = timedelta(seconds=time.monotonic() - start)
-            logger.warning("timed out getting %s (load phase) (elapsed=%.2fs)", url, scrape_response.elapsed.total_seconds())
+            result.timed_out_loading = True
+            result.elapsed = timedelta(seconds=time.monotonic() - start)
+            logger.warning("timed out getting %s (load phase) (elapsed=%.2fs)", url, result.elapsed.total_seconds())
             # wait for task to actually cancel
             if not load_task.done():
                 load_task.cancel()
@@ -146,11 +146,11 @@ async def get_with_timeout(
                     await load_task
                 except asyncio.CancelledError:
                     pass
-            return scrape_response
+            return result
 
-    scrape_response.timed_out = False
-    scrape_response.elapsed = timedelta(seconds=time.monotonic() - start)
-    return scrape_response
+    result.timed_out = False
+    result.elapsed = timedelta(seconds=time.monotonic() - start)
+    return result
 
 
 async def stop(browser: nodriver.Browser, graceful = True):

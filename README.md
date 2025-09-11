@@ -17,7 +17,6 @@ this library **depends** on [`twarped/nodriver`](https://github.com/twarped/nodr
 this library is mostly just a working proof of concept as of now, and will need some work still to really make it what I want it to be.
 
 - [ ] make timed_out_navigating vs timed_out_loading configurable in `crawl()`
-- [ ] fix stealth patch leaks (native masking)
 - [ ] ensure that links are deduped when crawling
 - [ ] fix `Manager` issue:
 	- [ ] doesn't stop on ctrl+c. you have to manually terminate the process
@@ -26,20 +25,17 @@ this library is mostly just a working proof of concept as of now, and will need 
 - [ ] solve datadome puzzle slider
 - [ ] migrate low level functions from `NodriverPlus` into separate files like `tab.py` or something
 	- [ ] then attach the high level `NodriverPlus` to those functions to make it more maintainable
-- [ ] turn stealth and `scrape_bytes` logic/functionality into target_interceptors/strings of functions that will occur in each of these events:
-	- [ ] target creation/attachment
-	- [ ] request interception
-	- [ ] response interception
-	- [ ] make sure that it can still follow redirects and stuff though
-	- [ ] and stay perfectly timed and stuff too
-- [ ] add target_interceptors: `ScrapeRequestInterceptor` and `ScrapeResponseInterceptor`
+- [ ] add target_interceptors: `ScrapeRequestInterceptor` and `ScrapeResultInterceptor`
 - [ ] turn handwritten target_interceptors into ones using the new api
-- [ ] add option to receive bytes as stream on `ScrapeResponse` instead of a cached var
+- [ ] add option to receive bytes as stream on `ScrapeResult` instead of a cached var
 - [ ] update `CrawlResultHandler` and `Manager` to handle errors and stuff
 - [ ] make `pymupdf` optional
+
 # usage
 
 example if you just want the stealth:
+
+(basically just the `hide_headless` flag since `--headless=new` passes a `Headless` token to the user agent.)
 ```python
 from nodriverplus import NodriverPlus
 
@@ -82,12 +78,12 @@ await ndp.stop()
 
 example if you want to crawl:
 ```python
-from nodriverplus import NodriverPlus, ScrapeResponseHandler
+from nodriverplus import NodriverPlus, ScrapeResultHandler
 
 ndp = NodriverPlus()
 await ndp.start() # headless or headful
 
-class MyCustomHandler(ScrapeResponseHandler):
+class MyCustomHandler(ScrapeResultHandler):
 
     async def html(self, response):
         print(response.html[:500])
@@ -95,7 +91,7 @@ class MyCustomHandler(ScrapeResponseHandler):
     async def links(self, response):
         links_to_crawl = []
         for link in response.links:
-        links_to_crawl.append(link)
+            links_to_crawl.append(link)
         print(f"found {len(links_to_crawl)} links to crawl")
         return links_to_crawl
 
@@ -111,7 +107,7 @@ handy if you want to run crawls and stuff from an http server
 from nodriverplus import (
     NodriverPlus,
     Manager,
-    ScrapeResponseHandler,
+    ScrapeResultHandler,
     CrawlResultHandler,
 )
 
@@ -122,7 +118,7 @@ manager = Manager(ndp, concurrency=2)
 manager.start()
 
 # simple result handlers
-class ScrapeHandler(ScrapeResponseHandler):
+class ScrapeHandler(ScrapeResultHandler):
     async def html(self, response):
         print(response.html[:500])
 
@@ -130,21 +126,21 @@ class CrawlHandler(CrawlResultHandler):
     async def handle(self, result):
         print(f"successfully crawled {len(result.successful_links)}")
 
-# enqueue a crawl
-await manager.enqueue_crawl("https://example.com",
-    scrape_response_handler=ScrapeHandler(),
+# enqueue a crawl (returns `None` immediately)
+manager.enqueue_crawl("https://example.com",
+    scrape_result_handler=ScrapeHandler(),
     crawl_result_handler=CrawlHandler()
 )
 
-# enqueue another crawl
-await manager.enqueue_crawl("https://example.com",
-    scrape_response_handler=ScrapeHandler(),
+# enqueue another crawl (same here)
+manager.enqueue_crawl("https://example.com",
+    scrape_result_handler=ScrapeHandler(),
     crawl_result_handler=CrawlHandler()
 )
 
-# enqueue a scrape
-await manager.enqueue_scrape("https://example.com",
-    scrape_response_handler=ScrapeHandler()
+# enqueue a scrape (returns `None` immediately)
+manager.enqueue_scrape("https://example.com",
+    scrape_result_handler=ScrapeHandler()
 )
 
 # optional:
@@ -160,12 +156,3 @@ save_queue_somehow(unfinished_queue)
 
 await ndp.stop()
 ```
-
-
-# usage theories
-
-you could probably execute some complicated crawls using the link handler.
-
-for example, you could set up a pre-picked list of links or link generator to crawl and feed it to the `links` method of the `ScrapeResponseHandler` with `crawl(depth=float('inf'), concurrency=1)` or something
-
-or maybe using `ScrapeResponse.tab` in an async `ScrapeResponseHandler` method to execute javascript and stuff in a tab before continuing the current link tree

@@ -18,9 +18,9 @@ from nodriver import cdp
 from urllib.parse import urlparse
 from ..utils import fix_url, extract_links
 from ..js.load import load_text as load_js
-from .scrape_response import (
-    ScrapeResponse, 
-    ScrapeResponseHandler, 
+from .scrape_result import (
+    ScrapeResult, 
+    ScrapeResultHandler, 
     CrawlResult,
     CrawlResultHandler, 
     FailedLink
@@ -91,7 +91,7 @@ async def get_user_agent(tab: nodriver.Tab):
 async def crawl(
     base: nodriver.Tab | nodriver.Browser,
     url: str,
-    scrape_response_handler: ScrapeResponseHandler = None,
+    scrape_result_handler: ScrapeResultHandler = None,
     depth: int | None = 1,
     crawl_result_handler: CrawlResultHandler = None,
     *,
@@ -103,7 +103,7 @@ async def crawl(
     extra_wait_ms = 0,
     concurrency: int = 1,
     max_pages: int | None = None,
-    collect_responses: bool = False,
+    collect_results: bool = False,
     delay_range: tuple[float, float] | None = None,
     # request_paused_handler: ScrapeRequestPausedHandler = None,
     proxy_server: str = None,
@@ -127,7 +127,7 @@ async def crawl(
 
     :param base: target tab or browser instance to run crawl on
     :param url: root starting point.
-    :param scrape_response_handler: optional `ScrapeResponseHandler` to be passed to `scrape()`
+    :param scrape_result_handler: optional `ScrapeResultHandler` to be passed to `scrape()`
     :param depth: max link depth (0 means single page).
     :param crawl_result_handler: if specified, `crawl_result_handler.handle()` 
     will be called and awaited before returning the final `CrawlResult`.
@@ -138,7 +138,7 @@ async def crawl(
     :param extra_wait_ms: post-load settle time.
     :param concurrency: worker concurrency.
     :param max_pages: hard cap on processed pages.
-    :param collect_responses: store every ScrapeResponse object.
+    :param collect_results: store every ScrapeResult object.
     :param delay_range: (min,max) jitter before first scrape per worker loop.
     :param tab_close_timeout: seconds to wait closing a tab.
     :param proxy_server: (EXPERIMENTAL) (Optional) Proxy server, similar to the one passed to --proxy-server
@@ -152,12 +152,12 @@ async def crawl(
     # **must be a type**—not an instance—so that it can be initiated later with the correct values attached
     # :type request_paused_handler: type[ScrapeRequestPausedHandler]
 
-    if scrape_response_handler is None:
-        if not collect_responses:
-            logger.warning("no `ScrapeResponseHandler` provided and collect_responses is False, only errors and links will be captured")
+    if scrape_result_handler is None:
+        if not collect_results:
+            logger.warning("no `ScrapeResultHandler` provided and collect_results is False, only errors and links will be captured")
         else:
-            logger.info("no `ScrapeResponseHandler` provided, using default handler functions")
-        scrape_response_handler = ScrapeResponseHandler()
+            logger.info("no `ScrapeResultHandler` provided, using default handler functions")
+        scrape_result_handler = ScrapeResultHandler()
 
     # normalize delay range if provided
     if delay_range is not None:
@@ -192,7 +192,7 @@ async def crawl(
     failed_links: list[FailedLink] = []
     timed_out_links: list[FailedLink] = []
     # optional heavy list of every response captured
-    responses: list[ScrapeResponse] = [] if collect_responses else None  # type: ignore
+    responses: list[ScrapeResult] = [] if collect_results else None  # type: ignore
 
     pages_processed = 0
     lock = asyncio.Lock()  # protects shared collections when needed
@@ -251,7 +251,7 @@ async def crawl(
                 queue.task_done()
                 continue
             error_obj: Exception | None = None
-            scrape_response: ScrapeResponse | None = None
+            scrape_result: ScrapeResult | None = None
             try:
                 # first scrape (root) is at depth 0
                 is_first_depth = current_depth == 0
@@ -260,11 +260,11 @@ async def crawl(
                     wait_time = random.uniform(*delay_range)
                     logger.info("waiting %.2f seconds before scraping %s", wait_time, current_url)
                     await asyncio.sleep(wait_time)
-                scrape_response = await scrape(
+                scrape_result = await scrape(
                     base=instance,
                     url=current_url,
                     # scrape_bytes=scrape_bytes,
-                    scrape_response_handler=scrape_response_handler,
+                    scrape_result_handler=scrape_result_handler,
                     navigation_timeout=navigation_timeout,
                     wait_for_page_load=wait_for_page_load,
                     page_load_timeout=page_load_timeout,
@@ -278,12 +278,12 @@ async def crawl(
                 )
                 pages_processed += 1
                 # determine final canonical URL (after redirects)
-                final_url = getattr(scrape_response, "url", None) or (scrape_response.tab.url if scrape_response.tab else current_url)
+                final_url = getattr(scrape_result, "url", None) or (scrape_result.tab.url if scrape_result.tab else current_url)
                 final_url = fix_url(final_url)
 
                 links: list[str] = []
-                if scrape_response.timed_out_navigating:
-                    timed_out_links.append(FailedLink(current_url, scrape_response.timed_out_navigating, error_obj))
+                if scrape_result.timed_out_navigating:
+                    timed_out_links.append(FailedLink(current_url, scrape_result.timed_out_navigating, error_obj))
                 else:
                     if final_url in processed_final_urls:
                         logger.debug("skip duplicate final url %s (source %s)", final_url, current_url)
@@ -296,14 +296,14 @@ async def crawl(
                                 all_links.append(final_url)
                         successful_links.append(final_url)
                         # adopt links extracted / supplied by handler
-                        links = scrape_response.links or []
+                        links = scrape_result.links or []
 
-                if collect_responses and scrape_response:
+                if collect_results and scrape_result:
                     async with lock:
-                        responses.append(scrape_response)
+                        responses.append(scrape_result)
 
                 # enqueue new links only if we processed this final url just now
-                if final_url in processed_final_urls and not scrape_response.timed_out_navigating:
+                if final_url in processed_final_urls and not scrape_result.timed_out_navigating:
                     # if depth is None there is no limit
                     if (depth is None or current_depth < depth) and links:
                         for link in links:
@@ -313,13 +313,13 @@ async def crawl(
                                 await queue.put((fix_url(link), current_depth + 1))
 
                 # close tab (timeout to avoid hang) unless it's the dedicated context tab
-                if scrape_response.tab and not (new_window and scrape_response.tab is instance):
+                if scrape_result.tab and not (new_window and scrape_result.tab is instance):
                     async def _close_tab(t_: nodriver.Tab):
                         try:
                             await asyncio.wait_for(t_.close(), timeout=5)
                         except Exception:
                             logger.warning("tab close failed or timed out for %s", getattr(t_, 'url', '<unknown>'))
-                    closing_tasks.append(asyncio.create_task(_close_tab(scrape_response.tab)))
+                    closing_tasks.append(asyncio.create_task(_close_tab(scrape_result.tab)))
             except Exception as e:
                 failed_links.append(FailedLink(current_url, False, e))
                 logger.exception("unexpected error during crawl for %s", current_url)
@@ -395,7 +395,7 @@ async def scrape(
     base: nodriver.Tab | nodriver.Browser,
     url: str,
     # scrape_bytes = True,
-    scrape_response_handler: ScrapeResponseHandler | None = None,
+    scrape_result_handler: ScrapeResultHandler | None = None,
     *,
     navigation_timeout = 30,
     wait_for_page_load = True,
@@ -414,22 +414,18 @@ async def scrape(
     handles navigation, timeouts, fetch interception, html capture, link parsing and
     cleanup (tab closure, pending task draining).
 
-    if `scrape_response_handler` is provided, `scrape_response_handler.handle()` will
-    be called exactly once and awaited before returning the final `ScrapeResponse`.
+    if `scrape_result_handler` is provided, `scrape_result_handler.handle()` will
+    be called exactly once and awaited before returning the final `ScrapeResult`.
 
     - **`proxy_server`** — (EXPERIMENTAL) (Optional) Proxy server, similar to the one passed to --proxy-server
     - **`proxy_bypass_list`** — (EXPERIMENTAL) (Optional) Proxy bypass list, similar to the one passed to --proxy-bypass-list
     - **`origins_with_universal_network_access`** — (EXPERIMENTAL) (Optional) An optional list of origins to grant unlimited cross-origin access to. Parts of the URL other than those constituting origin are ignored.
 
-    ### not implemented yet:
-    - `scrape_response_handler` could be useful if you want to execute stuff on `tab`
-    after the page loads, but before the `RequestPausedHandler` is removed
-
     :param base: reuse provided tab/browser root or create fresh.
     :param url: target url.
     :param scrape_bytes: capture non-text body bytes.
-    :param scrape_response_handler: if specified, `scrape_response_handler.handle()` will be called 
-    and awaited before returning the final `ScrapeResponse`
+    :param scrape_result_handler: if specified, `scrape_result_handler.handle()` will be called
+    and awaited before returning the final `ScrapeResult`.
     :param navigation_timeout: seconds for initial navigation.
     :param wait_for_page_load: await full load event.
     :param page_load_timeout: seconds for load phase.
@@ -441,17 +437,16 @@ async def scrape(
     :param origins_with_universal_network_access: (EXPERIMENTAL) (Optional) An optional list of origins to grant unlimited cross-origin access to. Parts of the URL other than those constituting origin are ignored.
     :param current_depth: mostly used by `crawl()` to pass current depth to handlers.
     :return: html/links/bytes/metadata
-    :rtype: ScrapeResponse
+    :rtype: ScrapeResult
     """
     # :param request_paused_handler: custom fetch interception handler.
     # **must be a type**—not an instance—so that it can be initiated later with the correct values attached
     # :type request_paused_handler: type[ScrapeRequestPausedHandler]
-
     
     start = time.monotonic()
     url = fix_url(url)
 
-    scrape_response = ScrapeResponse(url, current_depth=current_depth)
+    result = ScrapeResult(url, current_depth=current_depth)
     parsed_url = urlparse(url)
 
     # central acquisition
@@ -463,7 +458,7 @@ async def scrape(
         proxy_bypass_list=proxy_bypass_list,
         origins_with_universal_network_access=origins_with_universal_network_access,
     )
-    scrape_response.tab = tab
+    result.tab = tab
     logger.info("scraping %s", url)
 
     await tab.send(
@@ -484,7 +479,7 @@ async def scrape(
 
     # # use the stock handler unless a custom one is provided
     # request_paused_handler = (request_paused_handler or ScrapeRequestPausedHandler)(
-    #     tab, scrape_response, url, scrape_bytes
+    #     tab, result, url, scrape_bytes
     # )
     # await request_paused_handler.start()
 
@@ -497,38 +492,38 @@ async def scrape(
             page_load_timeout=page_load_timeout,
             extra_wait_ms=extra_wait_ms,
         )
-        scrape_response.timed_out = nav_response.timed_out
-        scrape_response.timed_out_navigating = nav_response.timed_out_navigating
-        scrape_response.timed_out_loading = nav_response.timed_out_loading
+        result.timed_out = nav_response.timed_out
+        result.timed_out_navigating = nav_response.timed_out_navigating
+        result.timed_out_loading = nav_response.timed_out_loading
 
         if not nav_response.timed_out_navigating:
             # if it's taking forever to load, get_content() will also take forever to load
-            scrape_response.html = await scrape_response.tab.evaluate("document.documentElement.outerHTML")
-            if isinstance(scrape_response.html, Exception):
-                raise scrape_response.html
+            result.html = await result.tab.evaluate("document.documentElement.outerHTML")
+            if isinstance(result.html, Exception):
+                raise result.html
             # use the final URL as the base for extracting links
-            scrape_response.links = extract_links(scrape_response.html, scrape_response.url)
+            result.links = extract_links(result.html, result.url)
         
         # run handler + teardown before possibly closing the tab
-        if scrape_response_handler:
+        if scrape_result_handler:
             # run handler only if links not already populated to avoid double execution under crawl()
             try:
-                scrape_response.links = await scrape_response_handler.handle(scrape_response)
+                result.links = await scrape_result_handler.handle(result)
             except Exception:
-                logger.exception("error running scrape_response_handler for %s", url)
-        scrape_response.elapsed = timedelta(seconds=time.monotonic() - start)
-        elapsed_seconds = scrape_response.elapsed.total_seconds()
+                logger.exception("error running scrape_result_handler for %s", url)
+        result.elapsed = timedelta(seconds=time.monotonic() - start)
+        elapsed_seconds = result.elapsed.total_seconds()
         logger.info("successfully finished scrape for %s (elapsed=%.2fs)", url, elapsed_seconds)
 
         # await request_paused_handler.stop()
     except Exception:
-        scrape_response.elapsed = timedelta(seconds=time.monotonic() - start)
-        elapsed_seconds = scrape_response.elapsed.total_seconds()
+        result.elapsed = timedelta(seconds=time.monotonic() - start)
+        elapsed_seconds = result.elapsed.total_seconds()
         logger.exception(
             "unexpected error during scrape for %s (elapsed=%.2fs):", url, elapsed_seconds
         )
 
-    return scrape_response
+    return result
 
 
 async def click_template_image(

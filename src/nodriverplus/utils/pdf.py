@@ -20,12 +20,11 @@ import logging
 import re
 import base64
 from dataclasses import dataclass
-import fitz
 from bs4 import BeautifulSoup, Tag
 from .html import normalize_html
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("nodriverplus.utils.pdf")
 
 DATA_URI_PATTERN = re.compile(r'src="(data:image/[^;]+;base64,)\s*(.*?)"', flags=re.DOTALL)
 BULLET_PATTERN = re.compile(r'^[\u2022\u25E6\u2219*\-–]\s+')  # • ◦ ∙ * - –
@@ -323,6 +322,11 @@ def pdf_to_html(pdf_bytes: bytes, url: str, embed_images = True):
     :return: cleaned html (no null bytes) ready for markdown.
     :rtype: str
     """
+    try:
+        import fitz # type: ignore
+    except ImportError:
+        raise ImportError("pymupdf is required for pdf support: uv add pymupdf")
+
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     parts: list[str] = []
     for i, page in enumerate(doc):

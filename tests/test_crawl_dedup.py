@@ -1,7 +1,10 @@
 import asyncio
 import pytest
 
-from nodriverplus import NodriverPlus, ScrapeResponseHandler
+from nodriverplus import NodriverPlus, ScrapeResultHandler
+
+import logging
+logging.basicConfig(level=logging.INFO)
 
 pytestmark = [
     pytest.mark.integration,
@@ -10,14 +13,14 @@ pytestmark = [
     pytest.mark.asyncio,
 ]
 
-class Duper(ScrapeResponseHandler):
-    async def links(self, scrape_response):
+class Duper(ScrapeResultHandler):
+    async def links(self, result):
         return ["https://example.com", "https://example.com"]
 
-async def _run_crawl(url: str, depth: int = 2):
+async def _run_crawl(url: str, depth: int = 4):
     ndp = NodriverPlus()
     await ndp.start(headless=True)
-    result = await ndp.crawl(url, scrape_response_handler=Duper(), depth=depth, concurrency=2)
+    result = await ndp.crawl(url, scrape_result_handler=Duper(), depth=depth, concurrency=2)
     await ndp.stop()
     return result
 
@@ -35,3 +38,5 @@ async def test_crawl_deduplication():
     # sanity: any link marked failed/timed out shouldn't also appear in successful twice
     dup_success = [u for u in result.successful_links if result.successful_links.count(u) > 1]
     assert not dup_success, f"duplicates in successful_links: {dup_success}"
+
+asyncio.run(test_crawl_deduplication())

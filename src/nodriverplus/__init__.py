@@ -1,13 +1,13 @@
 from .core.nodriverplus import NodriverPlus
-from .core.manager import Manager
+from .core.manager import Manager, ManagerJob
 from .core.user_agent import UserAgent
-from .core.scrape_response import (
+from .core.scrape_result import (
     CrawlResult, 
     CrawlResultHandler, 
-    ScrapeResponse, 
-    ScrapeResponseHandler, 
-    ScrapeResponseIntercepted, 
-    ScrapeRequestIntercepted
+    ScrapeResult, 
+    ScrapeResultHandler, 
+    InterceptedResponseMeta, 
+    InterceptedRequestMeta
 )
 from .core.handlers import (
     NetworkWatcher,
@@ -47,11 +47,12 @@ __all__ = [
     "cdp",
     "NodriverPlus",
     "Manager",
+    "ManagerJob",
     "UserAgent",
-    "ScrapeResponse",
-    "ScrapeResponseHandler",
-    "ScrapeResponseIntercepted",
-    "ScrapeRequestIntercepted",
+    "ScrapeResult",
+    "ScrapeResultHandler",
+    "InterceptedResponseMeta",
+    "InterceptedRequestMeta",
     "NetworkWatcher",
     "TargetInterceptor",
     "TargetInterceptorManager",

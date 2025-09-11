@@ -1,7 +1,7 @@
 [project]
 name = "nodriverplus"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "an advanced scraper and crawler framework built for nodriver"
 readme = "README.md"
 authors = [
     { name = "twarped", email = "samthebeastofall@gmail.com" }
@@ -12,10 +12,16 @@ dependencies = [
     "html-to-markdown>=1.9.0",
     "nodriver",
     "opencv-python-headless>=4.12.0.88",
-    "pymupdf>=1.26.4",
+    "urlcanon>=0.3.1",
+]
+
+[project.optional-dependencies]
+testing = [
     "pytest>=8.4.1",
     "pytest-asyncio>=1.1.0",
-    "urlcanon>=0.3.1",
+]
+pdfs = [
+    "pymupdf>=1.26.4",
 ]
 
 [build-system]
