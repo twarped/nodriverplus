@@ -160,7 +160,7 @@ async def stop(browser: nodriver.Browser, graceful = True):
     """
     logger.info("stopping browser")
     browser.stop()
-    if graceful:
+    if graceful and browser._process is not None:
         logger.info("waiting for graceful shutdown")
         await browser._process.wait()
     logger.info("successfully shutdown browser")

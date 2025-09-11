@@ -235,20 +235,21 @@ class CloudflareSolver(NetworkWatcher):
         logger.info("cloudflare challenge detected on %s", tab)
         tab._has_cf_clearance = False
         tab._cf_turnstile_detected = True
-        # stop looping if solver is stopping, tab detached, or timeout reached
-        start = time.time()
         # memo browser tabs list for quick lookups (avoid O(n) every loop)
         def tab_alive() -> bool:
             return any(t.target_id == tab.target_id for t in tab.browser.tabs)
 
+        # try both light and dark template images
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        templates = [
+            os.path.join(base_dir, "cloudflare_light__x-120__y0.png"),
+            os.path.join(base_dir, "cloudflare_dark__x-120__y0.png"),
+        ]
         while (not tab._has_cf_clearance
                and not self._stop_reaper.is_set()
                and tab_alive()):
-            # try both light and dark template images
-            for template in [
-                "cloudflare_light__x-120__y0.png",
-                "cloudflare_dark__x-120__y0.png",
-            ]:
+            
+            for template in templates:
                 if tab._has_cf_clearance:
                     break
                 if not tab_alive():
