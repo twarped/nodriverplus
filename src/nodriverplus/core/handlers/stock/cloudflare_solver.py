@@ -50,7 +50,7 @@ class HangingHandler(http.server.BaseHTTPRequestHandler):
             try:
                 self.send_response(200)
                 self.end_headers()
-                self.wfile.write(b"OK")
+                self.wfile.write(b"")
                 logger.debug("released hanging request: %s (immediate)", self.path)
             except BrokenPipeError:
                 logger.debug("client closed before immediate release (BrokenPipeError): %s", self.path)
@@ -64,7 +64,7 @@ class HangingHandler(http.server.BaseHTTPRequestHandler):
         try:
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(b"OK")
+            self.wfile.write(b"")
             logger.debug("released hanging request: %s", self.path)
         except BrokenPipeError:
             logger.debug("client closed before gated release (BrokenPipeError): %s", self.path)
@@ -184,7 +184,6 @@ class CloudflareSolver(NetworkWatcher):
         """
         stop `CloudflareSolver` and all background threads/servers
         """
-        # print("stopping the solver")
         # signal background thread to exit
         self._stop_reaper.set()
         # stop server so serve_forever returns
@@ -197,7 +196,6 @@ class CloudflareSolver(NetworkWatcher):
             self.reaper_thread.join()
         if self.server_thread.is_alive():
             self.server_thread.join()
-        # print("stopped the solver")
 
     def _start_reaper(self, interval: float = 5.0, max_age: float = 30.0):
         """start background thread to reap stale gates"""
@@ -262,6 +260,8 @@ class CloudflareSolver(NetworkWatcher):
         templates = [
             os.path.join(base_dir, "cloudflare_light__x-120__y0.png"),
             os.path.join(base_dir, "cloudflare_dark__x-120__y0.png"),
+            os.path.join(base_dir, "cloudflare_light__x-185__y0.png"),
+            os.path.join(base_dir, "cloudflare_dark__x-185__y0.png"),
         ]
         while (not tab._has_cf_clearance
                and not self._stop_reaper.is_set()
@@ -311,7 +311,7 @@ class CloudflareSolver(NetworkWatcher):
         
         sets up hang gates for requests that shouldn't be ignored
         """
-        if self.should_ignore(ev.request.url, ev.request.method):
+        if self.should_ignore(ev.request.url, ev.request.method) or tab is None:
             logger.debug("ignoring request: %s", ev.request.url)
             return
         current_gates = self.gates.get(tab.target_id, {})
@@ -338,8 +338,10 @@ class CloudflareSolver(NetworkWatcher):
         """called on each `LoadingFailed` event
 
         releases gates on failed requests/responses
-        so that they don't hang forever unknown        
+        so that they don't hang forever unknown
         """
+        if tab is None:
+            return
         req_url = request_will_be_sent.request.url if request_will_be_sent else "unknown"
         logger.debug("loading failed req=%s url=%s err=%s", ev.request_id, req_url, ev.error_text)
         # release gate if a gated request failed
@@ -394,7 +396,7 @@ class CloudflareSolver(NetworkWatcher):
         then delete any existing `cf_clearance` cookie
         so that step `3` hopefully won't have any false positives.
         """
-        if self.should_ignore(ev.response.url):
+        if self.should_ignore(ev.response.url) or tab is None:
             logger.debug("ignoring response: %s", ev.response.url)
             return
         headers = extra_info.headers.to_json() if extra_info else ev.response.headers.to_json()

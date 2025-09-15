@@ -29,10 +29,15 @@ class UserAgentPatch(TargetInterceptor):
         await self.patch_user_agent(connection, ev, self.user_agent, self.hide_headless)
 
     async def on_change(self, connection, ev):
-        await self.patch_user_agent(connection, ev, self.user_agent, self.hide_headless)
+        try:
+            await self.patch_user_agent(connection, ev, self.user_agent, self.hide_headless)
+        except Exception as e:
+            if "-32601" in str(e):
+                logger.debug("(on_change) domain not available to patch user agent for %s <%s>:\n  %s",
+                    ev.target_info.type_, ev.target_info.url, e)
 
     @staticmethod
-    async def patch_user_agent( 
+    async def patch_user_agent(
         connection: nodriver.Tab | nodriver.Connection,
         ev: cdp.target.AttachedToTarget | None,
         user_agent: UserAgent,

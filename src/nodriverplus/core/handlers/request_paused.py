@@ -17,6 +17,15 @@ design notes:
 - predicates (`should_*`) are small override points to steer control flow
 - separation of streaming (`take_response_body_as_stream`) from fulfillment keeps memory + clarity
 - tasks set prevents racy shutdown by awaiting outstanding async handler work
+
+quick start for response body streaming:
+1. subclass `RequestPausedHandler`
+2. override `should_intercept_response()` to return True for target requests
+3. override `should_take_response_body_as_stream()` to return True for target responses
+4. access captured bytes via `base64.b64decode(ev.body)` in `on_stream_finished()`
+
+**important**: `ev.body` is always base64-encoded for Chrome CDP protocol compatibility.
+always attach it to `ev` as `base64`, or `fulfill_request()` will fail.
 """
 
 from __future__ import annotations
@@ -50,87 +59,46 @@ class NavigationContext:
 
 @dataclass
 class RequestMeta:
-    """typed per-event interception metadata.
+    """per-event interception metadata.
 
-    fields:
-    - request_url: url (may update across hops)
-    - nav_request_id: cdp request id
-    - is_main_candidate: set during request phase when it might become main nav
-    - is_main: resolved main navigation flag (response phase)
-    - is_redirect: this event is a redirect (3xx)
-    - redirect_target: resolved redirect location (absolute)
-    - final_main: final non-redirect main navigation completed
-    - streamed: response body captured via streaming path
+    tracked fields:
+    - `request_url`: current url for this paused event (updated across hops)
+    - `nav_request_id`: CDP request id
+    - `is_redirect`: whether this response is a redirect (status 3xx)
+    - `redirect_target`: redirect destination (if any)
+    - `streamed`: response body captured via streaming path
+    - `request_will_be_sent_extra_info`: optional `RequestWillBeSentExtraInfo` event attached (if captured)
     """
     request_url: str
     nav_request_id: str
-    is_main_candidate: bool = False
-    is_main: bool = False
     is_redirect: bool = False
     redirect_target: str | None = None
-    final_main: bool = False
     streamed: bool = False
+    request_will_be_sent_extra_info: cdp.network.RequestWillBeSentExtraInfo | None = None
 
     @classmethod
-    def from_request(cls, ev: cdp.fetch.RequestPaused) -> "RequestMeta":
-        """create a RequestMeta initialized from a request-paused event.
-
-        copies the current `ev.request.url` and `ev.request_id` into a new
-        RequestMeta instance so callers can attach it to `ev.meta`.
-        """
+    def from_event(cls, ev: cdp.fetch.RequestPaused) -> "RequestMeta":
         return cls(request_url=ev.request.url, nav_request_id=ev.request_id)
 
-    def mark_main_candidate(self, flag: bool):
-        """mark whether this paused request is a main-navigation candidate.
-
-        flag - True when the URL appears to be the main navigation for this chain.
-        """
-        self.is_main_candidate = flag
-
     def mark_redirect(self, target: str):
-        """record a redirect hop for this event and set the redirect target.
-
-        target - absolute redirect destination (typically urljoin result).
-        """
         self.is_redirect = True
         self.redirect_target = target
 
-    def mark_final_main(self):
-        """mark this event as the final non-redirect main navigation.
-
-        this flips both `final_main` and `is_main` so downstream logic can
-        decide to stream or purge context reliably.
-        """
-        self.final_main = True
-        self.is_main = True
-
     def mark_streamed(self):
-        """indicate the response body has been captured via streaming.
-
-        used to avoid double-processing the body on races.
-        """
         self.streamed = True
 
     def to_dict(self):
-        """return a shallow dict representation for logging or serialization."""
         return asdict(self)
 
 
 class RequestPausedHandler:
     """
-    # **TODO/NOTE:**
-    for some reason, intercepting requests triggers this error in sandboxed iframes:
-    
-    `Blocked script execution in 'about:blank' because the document's 
-    frame is sandboxed and the 'allow-scripts' permission is not set.`
-
-    this triggers cloudflare so that you won't ever receive a cf_clearance token.
-    definitely needs fixed.
+    **NOTE:**
+    - must be attached to a `TargetInterceptorManager` instance if
+    you don't want to have to attach it manually to every tab you create.
 
     # overview:
     orchestrates request/response interception for a single tab.
-
-    **note**: can remove the `Range` header from requests in `_annotate_request_navigation()`
 
     lifecycle (request phase):
     1. `on_request(ev)` - inspect / prep state
@@ -145,31 +113,80 @@ class RequestPausedHandler:
     - overrides should avoid replacing `ev` wholesale; adjust fields so later steps see changes
 
     extension points:
-    - override `should_*` predicates for custom logic
-    - override `handle_response_body` for post-stream transformations
+    - override `should_*()` predicates for custom logic
+    - override `on_stream_finish()` for post-stream transformations
 
     concurrency:
     - each intercepted event scheduled as a Task; `wait_for_tasks()` drains them on shutdown
+
+    # streaming flow (for capturing response bodies' full byte-stream):
+    to capture raw response bytes (e.g., PDFs, images) before Chrome processes them:
+
+    1. override `should_intercept_response(ev)` to return True for requests you want to intercept responses for.
+       this enables response phase interception during the request phase.
+
+    2. when the response arrives, override `should_take_response_body_as_stream(ev)` to return True
+       for responses whose bodies you want to capture as a stream.
+
+    3. the framework will automatically call `take_response_body_as_stream(ev)`, which:
+       - gets a stream handle from Chrome
+       - reads all chunks into `ev.body` (base64-encoded)
+       - calls `on_stream_finished(ev)` for post-processing
+       - fulfills the request with the captured body
+
+    4. access the captured bytes via `ev.body` (base64 string) or decode it: `base64.b64decode(ev.body)`
+
+    **important**: `ev.body` must always be base64-encoded and attached to `ev` for `fulfill_request()` to work.
+    Chrome's CDP protocol requires base64-encoded body data.
+
+    example usage for PDF capture:
+
+    ```python
+    class PDFCaptureHandler(RequestPausedHandler):
+        async def should_intercept_response(self, ev):
+            # intercept responses for PDF URLs
+            return ev.request.url.endswith('.pdf')
+
+        async def should_take_response_body_as_stream(self, ev):
+            # stream all intercepted responses
+            return True
+
+        async def on_stream_finished(self, ev):
+            # save the PDF bytes - ev.body is base64-encoded, decode it first
+            pdf_bytes = base64.b64decode(ev.body)
+            with open('captured.pdf', 'wb') as f:
+                f.write(pdf_bytes)
+            # if you modify ev.body, it must remain base64-encoded for fulfill_request
+            # ev.body = base64.b64encode(modified_pdf_bytes).decode()
+    ```
     """
     # TODO:
     # i'm not sure how `binary_response_headers` work,
     # so some of that might need refactoring later on.
 
-    tab: nodriver.Tab
-    tasks: set[asyncio.Task]
-    remove_range_header: bool
-
     nav_contexts: dict[str, NavigationContext]
 
-    def __init__(self, tab: nodriver.Tab, remove_range_header = True):
+    def __init__(self,
+        tab: nodriver.Tab,
+        capture_request_extra_info: bool = True
+    ):
+        """initialize a `RequestPausedHandler` for a given `Tab`.
+        
+        :param tab: the `Tab` to attach to.
+        :param capture_request_extra_info: whether to capture `RequestWillBeSentExtraInfo` events.
+        """
         self.tab = tab
-        self.remove_range_header = remove_range_header
-        self.tasks = set()
+        self.tasks: set[asyncio.Task] = set()
         # per-requestId navigation contexts (one logical chain per active id)
         # nav_contexts[request_id] = NavigationContext
         self.nav_contexts = {}
         # single lock is fine for tiny critical sections; keeps races away
         self._nav_lock = asyncio.Lock()
+        # track RequestWillBeSentExtraInfo events (optional)
+        self.capture_request_extra_info = capture_request_extra_info
+        self._request_extra_info: dict[str, cdp.network.RequestWillBeSentExtraInfo] = {}
+        self._extra_info_handler_added = False
+        self._started = False
 
 
     # helper for tracking request redirects
@@ -182,34 +199,27 @@ class RequestPausedHandler:
                 self.nav_contexts[ev.request_id] = ctx
         meta = getattr(ev, "meta", None)
         if not isinstance(meta, RequestMeta):
-            meta = RequestMeta.from_request(ev)
+            meta = RequestMeta.from_event(ev)
             ev.meta = meta
         meta.request_url = ev.request.url
         meta.nav_request_id = ev.request_id
-        meta.mark_main_candidate(ev.request.url == ctx.current and not ctx.done)
-        # remove Range header to avoid servers sending 206 partial responses
-        if self.remove_range_header:
-            for k in list(ev.request.headers.keys()):
-                if k.lower() == "range":
-                    ev.request.headers.pop(k, None)
+        # attach any captured RequestWillBeSentExtraInfo for downstream logic
+        if self.capture_request_extra_info:
+            extra = self._request_extra_info.get(ev.request_id)
+            if extra is not None:
+                meta.request_will_be_sent_extra_info = extra
+                logger.debug("RequestWillBeSentExtraInfo for %s\n%s", ev.request.url, extra)
 
 
 
     # helper for tracking response redirects
     async def _annotate_response_navigation(self, ev: cdp.fetch.RequestPaused) -> bool:
-        """annotate redirect + main flags for this requestId; True when redirect handled.
+        """annotate redirect metadata for this `request_id`; `True` when redirect handled.
 
-        per-event meta keys:
-        - is_main
-        - is_redirect
-        - redirect_target
-        - final_main
-        - nav_request_id
-        also sets meta['purge_nav_ctx'] when final main completes so caller can delete context.
         """
         meta = getattr(ev, "meta", None)
         if not isinstance(meta, RequestMeta):
-            meta = RequestMeta.from_request(ev)
+            meta = RequestMeta.from_event(ev)
             ev.meta = meta
         async with self._nav_lock:
             ctx = self.nav_contexts.get(ev.request_id)
@@ -225,25 +235,17 @@ class RequestPausedHandler:
                     location = h.value
                     break
         is_redirect = 300 <= status < 400
-        is_main = (ev.request.url == ctx.current and not ctx.done) or meta.is_main_candidate
-        meta.is_main = bool(is_main)
         meta.is_redirect = bool(is_redirect)
         meta.redirect_target = None
-        meta.final_main = False
         meta.nav_request_id = ev.request_id
 
-        if is_main and is_redirect and location:
+        if is_redirect and location:
             from urllib.parse import urljoin
             redirect_target = urljoin(ev.request.url, location)
             meta.mark_redirect(redirect_target)
             async with self._nav_lock:
                 ctx.chain.append(redirect_target)
             return True
-        if is_main and not is_redirect and not ctx.done:
-            async with self._nav_lock:
-                ctx.final = ev.request.url
-                ctx.done = True
-            meta.mark_final_main()
         return False
 
 
@@ -259,7 +261,7 @@ class RequestPausedHandler:
         (e.g. body injection, auth challenge response). we treat it as state passed through
         the decision tree.
 
-        :param ev: cdp.fetch.RequestPaused interception event (MUTATED IN-PLACE ACROSS FLOW).
+        :param ev: `cdp.fetch.RequestPaused` interception event (MUTATED IN-PLACE ACROSS FLOW).
         """
         pass
 
@@ -270,7 +272,8 @@ class RequestPausedHandler:
         return True to short-circuit and send a fail_request; default False keeps it flowing.
 
         :param ev: interception event (mutable) used for decision logic.
-        :return: bool flag to trigger fail_request.
+        :return: bool flag to trigger `fail_request()`.
+        :rtype: bool
         """
         return False
     
@@ -297,8 +300,12 @@ class RequestPausedHandler:
 
         return True when we intend to build / modify a response via fulfill_request.
 
+        **important**: if you plan to set `ev.body` in this method or downstream,
+        it must be base64-encoded for `fulfill_request()` to work with Chrome's CDP protocol.
+
         :param ev: interception event (mutable) you may pre-populate with body / headers.
-        :return: bool flag to trigger fulfill_request.
+        :return: bool flag to trigger `fulfill_request()`.
+        :rtype: bool
         """
         return False
     
@@ -308,6 +315,9 @@ class RequestPausedHandler:
 
         mutation note: body / headers may have been set by earlier steps (e.g. stream capture).
 
+        **important**: if providing a body, `ev.body` must be base64-encoded as required by Chrome's CDP protocol.
+        The body data will be sent as-is to fulfill the request.
+
         :param ev: interception event containing response parameters (MUTATED PRIOR).
 
         expected `ev` state:
@@ -316,7 +326,7 @@ class RequestPausedHandler:
         - `response_status_text`: (optional) str status text
         - `response_headers`: list[HeaderEntry]
         - `binary_response_headers`: (optional)
-        - `body`: (optional base64) — mutated previously (e.g. by streaming helpers)
+        - `body`: (optional base64-encoded string) — must be base64 for CDP compatibility
         """
         await self.tab.send(
             cdp.fetch.fulfill_request(
@@ -334,11 +344,23 @@ class RequestPausedHandler:
     async def should_intercept_response(self, ev: cdp.fetch.RequestPaused) -> bool:
         """predicate controlling whether to intercept the response phase.
 
-        return True to enable response phase interception (response_* fields populated);
+        return `True` to enable response phase interception (`response_*` fields populated);
         default False lets the response flow through unmodified.
 
+        ### this is called during the request phase to decide if we should pause the response.
+        only when this returns `True` will response-phase
+        methods like `on_response()` and `should_take_response_body_as_stream()` be called.
+
+        example: only intercept responses whose URL includes "jim":
+
+        ```python
+        async def should_intercept_response(self, ev):
+            return "jim" in ev.request.url
+        ```
+
         :param ev: interception event (mutable) used for decision logic.
-        :return: bool flag to trigger response phase interception.
+        :return: bool flag to trigger response phase interception. (`on_response()` etc.)
+        :rtype: bool
         """
         return False
 
@@ -347,6 +369,9 @@ class RequestPausedHandler:
         """allow the original request to proceed untouched (or lightly adjusted).
 
         can optionally mutate `ev.request` before continuing.
+
+        also, if you override this method, ensure that `ev.request.post_data` is
+        base64-encoded if present, otherwise CDP will throw.
 
         :param ev: interception event referencing the paused network request.
         """
@@ -365,31 +390,50 @@ class RequestPausedHandler:
                     # unknown type - skip encoding and let chrome handle (will likely fail)
                     logger.debug("unexpected post_data type for %s: %r", ev.request.url, type(post_data))
         header_entries = [cdp.fetch.HeaderEntry(name=key, value=value) for key, value in ev.request.headers.items()]
-        logger.info("continuing request for %s with headers:\n%s", ev.request.url, header_entries)
-        await self.tab.send(
-            cdp.fetch.continue_request(
-                ev.request_id,
-                ev.request.url,
-                ev.request.method,
-                post_data,
-                header_entries,
-                await self.should_intercept_response(ev)
+        logger.debug("continuing request for %s", ev.request.url)
+        try:
+            await self.tab.send(
+                cdp.fetch.continue_request(
+                    ev.request_id,
+                    ev.request.url,
+                    ev.request.method,
+                    post_data,
+                    header_entries,
+                    bool(await self.should_intercept_response(ev))
+                )
             )
-        )
+        except Exception as e:
+            if "[-32" in str(e):
+                logger.debug("failed to continue request for %s:\n  %s",
+                    ev.request.url, e)
         logger.debug("successfully continued request for %s", ev.request.url)
 
 
     async def should_take_response_body_as_stream(self, ev: cdp.fetch.RequestPaused) -> bool:
         """predicate for streaming response bodies before chrome consumes them.
 
-        **NOTE**: this is only invoked when `should_intercept_response()` returns True.
+        **NOTE**: this is only invoked when `should_intercept_response()` returns `True`.
 
         use when you need raw bytes (pdf, media) or want to transform before fulfill.
+        when `True`, the response body will be captured as a stream and stored in `ev.body`
+        (base64-encoded), then the request will be fulfilled with that body.
 
-        happens during request interception
+        this happens during the response phase, after `on_response()` is called.
+
+        example: stream all PDF responses:
+
+        ```python
+        async def should_take_response_body_as_stream(self, ev):
+            content_type = None
+            for header in ev.response_headers or []:
+                if header.name.lower() == 'content-type':
+                    content_type = header.value.lower()
+                    break
+            return 'application/pdf' in content_type
+        ```
 
         :param ev: interception event (mutable) used to decide streaming.
-        :return: bool to trigger take_response_body_as_stream.
+        :return: bool to trigger `take_response_body_as_stream()`.
         :rtype: bool
         """
         return False
@@ -406,7 +450,28 @@ class RequestPausedHandler:
         2. decode base64 when flagged (cdp returns a pair (b64flag,data,...))
         3. aggregate, then assign `ev.body` (base64 re-encoded)
 
-        mutation note: sets `ev.body` which later fulfill_request reuses.
+        **important**: `ev.body` is always set as a base64-encoded string for CDP protocol compatibility.
+        this is required for `fulfill_request()` to work properly.
+
+        mutation note: sets `ev.body` which `fulfill_request()` later reuses.
+
+        override this method if you need custom stream processing (e.g., partial reads,
+        compression, or avoiding full buffering for large files).
+
+        example: save large files directly to disk without buffering in memory:
+
+        ```python
+        async def handle_response_body_stream(self, ev, stream):
+            with open('large_file.pdf', 'wb') as f:
+                while True:
+                    b64, data, eof = await self.tab.send(cdp.io.read(handle=stream))
+                    chunk = base64.b64decode(data) if b64 else bytes(data, "utf-8")
+                    f.write(chunk)
+                    if eof: break
+            # IMPORTANT: ev.body must be set to base64-encoded data for fulfill_request to work
+            # even if saving to disk, provide empty base64 body or chrome will reject
+            ev.body = base64.b64encode(b'').decode()
+        ```
 
         :param ev: interception event mutated with body.
         :param stream: stream handle from Fetch.takeResponseBodyAsStream.
@@ -424,6 +489,23 @@ class RequestPausedHandler:
         without having to modify `take_response_body_as_stream()` or
         `handle_response_body_stream()`.
 
+        this is called after the stream has been fully read and `ev.body` is set.
+        use this for post-processing like decoding, validation, or side effects.
+
+        **important**: `ev.body` must remain base64-encoded for `fulfill_request()` to work.
+        if you modify the body data, re-encode it: `ev.body = base64.b64encode(new_bytes).decode()`
+
+        example: decode and validate PDF content:
+
+        ```python
+        async def on_stream_finished(self, ev):
+            pdf_bytes = base64.b64decode(ev.body)
+            if not pdf_bytes.startswith(b'%PDF-'):
+                logger.warning("received non-PDF content for %s", ev.request.url)
+            # IMPORTANT: if you modify the body, re-encode it to base64 for fulfill_request
+            # ev.body = base64.b64encode(modified_bytes).decode()
+        ```
+
         :param ev: interception event mutated with body.
         """
         pass
@@ -432,10 +514,23 @@ class RequestPausedHandler:
     async def take_response_body_as_stream(self, ev: cdp.fetch.RequestPaused):
         """wrapper performing takeResponseBodyAsStream + buffering + closure.
 
-        mutation note: attaches processed base64 body to `ev.body` for subsequent fulfill.
+        attaches processed base64-encoded body to `ev.body` for subsequent fulfill.
 
-        override `on_stream_finished()` to easily access or modify `ev.body` before
-        fulfillment without modifying this function or `handle_response_body_stream()`.
+        **NOTE**: override `on_stream_finished()` to **easily access or modify** `ev.body` before
+        fulfillment *without* modifying this function or `handle_response_body_stream()`.
+
+        this method is called automatically when `should_take_response_body_as_stream()`
+        returns `True`.
+
+        flow:
+        1. request stream handle from chrome
+        2. call `handle_response_body_stream()` to read chunks into `ev.body`
+        3. call `on_stream_finished()` for post-processing
+        4. close the stream handle
+        5. mark the event as streamed to prevent double-processing
+
+        **important**:
+        - `ev.body` must remain base64-encoded for `fulfill_request()` to work with chrome's CDP protocol.
 
         :param ev: interception event mutated with body.
         """
@@ -448,7 +543,7 @@ class RequestPausedHandler:
         # mark streamed so we never double-handle body on late races
         meta = getattr(ev, "meta", None)
         if not isinstance(meta, RequestMeta):
-            meta = RequestMeta.from_request(ev)
+            meta = RequestMeta.from_event(ev)
             ev.meta = meta  # type: ignore[attr-defined]
         meta.mark_streamed()
 
@@ -494,10 +589,23 @@ class RequestPausedHandler:
         """internal dispatcher orchestrating request vs response phases.
 
         decision tree:
-        - if no response yet: run on_request -> predicates (fail | fulfill | stream | continue)
-        - if response: on_response -> continue_response
+        - if no response yet (request phase):
+          1. annotate navigation state
+          2. call `on_request(ev)`
+          3. check predicates in order: fail -> fulfill -> continue
+             (continue calls `should_intercept_response()` to enable response interception)
 
-        mutation note: `ev` may receive added fields (body, binary_response_headers, etc.).
+        - if response available (response phase):
+          1. annotate navigation state
+          2. call `on_response(ev)`
+          3. if redirect: `continue_response`
+          4. elif `should_take_response_body_as_stream()`: 
+             stream body -> `fulfill_request`
+          5. else: `continue_response`
+          6. clean up navigation context
+
+        mutation note: `ev` may receive added or mutated
+        fields (`body`, `binary_response_headers`, etc.).
 
         :param ev: interception event being processed (MUTATED ACROSS STEPS).
         """
@@ -526,16 +634,13 @@ class RequestPausedHandler:
                     ev.request.url
                 )
                 await self.continue_response(ev)
-            elif (
-                isinstance(meta, RequestMeta) 
-                and meta.final_main 
-                and await self.should_take_response_body_as_stream(ev)
-            ):
+            elif await self.should_take_response_body_as_stream(ev):
                 await self.take_response_body_as_stream(ev)
                 await self.fulfill_request(ev)
             else:
                 await self.continue_response(ev)
-            if isinstance(meta, RequestMeta) and meta.final_main:
+            # cleanup context after final (non-redirect) response
+            if isinstance(meta, RequestMeta) and not meta.is_redirect:
                 async with self._nav_lock:
                     self.nav_contexts.pop(ev.request_id, None)
 
@@ -550,10 +655,6 @@ class RequestPausedHandler:
         task.add_done_callback(lambda t: self.tasks.discard(t))
 
 
-    def __call__(self, ev: cdp.fetch.RequestPaused):
-        self.handle(ev)
-
-
     async def wait_for_tasks(self):
         """await all outstanding interception tasks."""
         logger.info("waiting for pending tasks to finish")
@@ -561,15 +662,34 @@ class RequestPausedHandler:
         logger.info("all pending tasks finished")
 
 
+    def _store_request_will_be_sent_extra_info(self, ev: cdp.network.RequestWillBeSentExtraInfo):
+        # store latest; do not purge immediately (fetch events can arrive after Network events)
+        self._request_extra_info[ev.request_id] = ev
+
+
     async def start(self):
         """
         start request interception on the current tab and config
         """
-        await self.tab.send(cdp.fetch.enable())
+        if self._started:
+            return
+        self._started = True
+        await self.tab.send(cdp.fetch.enable([
+            cdp.fetch.RequestPattern(url_pattern="*")
+        ]))
         await self.tab.send(cdp.network.enable())
+        logger.debug("enabled domains: %s", self.tab.enabled_domains)
+        if cdp.fetch not in self.tab.enabled_domains:
+            self.tab.enabled_domains.append(cdp.fetch)
+        if cdp.network not in self.tab.enabled_domains:
+            self.tab.enabled_domains.append(cdp.network)
         # ensure chrome always loads fresh bytes
         # await self.tab.send(cdp.network.set_cache_disabled(True))
         self.tab.add_handler(cdp.fetch.RequestPaused, self.handle)
+        if self.capture_request_extra_info and not self._extra_info_handler_added:
+            # capture RequestWillBeSentExtraInfo so that paused events can reference original headers
+            self.tab.add_handler(cdp.network.RequestWillBeSentExtraInfo, self._store_request_will_be_sent_extra_info)
+            self._extra_info_handler_added = True
 
 
     async def stop(self, remove_handler = True, wait_for_tasks = True):
@@ -581,6 +701,8 @@ class RequestPausedHandler:
         """
         if remove_handler:
             self.tab.remove_handler(cdp.fetch.RequestPaused, self.handle)
+            if self._extra_info_handler_added:
+                self.tab.remove_handler(cdp.network.RequestWillBeSentExtraInfo, self._store_request_will_be_sent_extra_info)
         if wait_for_tasks:
             await self.wait_for_tasks()
 

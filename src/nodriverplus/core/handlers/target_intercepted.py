@@ -4,7 +4,7 @@ import logging
 import traceback
 from typing import Callable, Awaitable
 from nodriver import cdp, Tab, Connection, Browser
-from ..cdp_helpers import can_use_domain
+from ..handlers.request_paused import RequestPausedHandler
 import os
 
 logger = logging.getLogger("nodriverplus.TargetInterceptorManager")
@@ -17,58 +17,93 @@ class NetworkWatcher:
     **NOTE**: this class is tied closely to `TargetInterceptorManager` and
     is not useful on its own.
     
-    **TODO**:
-    - add `on_loading_finished`?
-    - add `on_data_received`?
-    - make it less convoluted probably.
+    hooks:
+    - on_request
+    - on_request_extra_info
+    - on_response
+    - on_response_extra_info
+    - on_loading_failed
+    - on_loading_finished
+    - on_data_received
     """
 
     async def on_response(self, 
-        tab: Tab,
+        tab: Tab | None,
         ev: cdp.network.ResponseReceived,
         extra_info: cdp.network.ResponseReceivedExtraInfo | None,
     ):
         """
         handle a `ResponseReceived` event
         
-        :param tab: the `Tab` the event was received on.
+        :param tab: the `Tab` the event was received on if available.
         :param ev: the `ResponseReceived` event.
         :param extra_info: the `ResponseReceivedExtraInfo` event, if available.
         """
         pass
 
     async def on_response_extra_info(self,
+        tab: Tab | None,
         ev: cdp.network.ResponseReceivedExtraInfo,
     ):
         """
         handle a `ResponseReceivedExtraInfo` event
-        
+
+        :param tab: the `Tab` the event was received on if available.
         :param ev: the `ResponseReceivedExtraInfo` event.
         """
         pass
 
     async def on_loading_failed(self,
-        tab: Tab,
+        tab: Tab | None,
         ev: cdp.network.LoadingFailed,
         request_will_be_sent: cdp.network.RequestWillBeSent,
     ):
         """
         handle a `LoadingFailed` event
 
-        :param tab: the `Tab` the event was received on.
+        :param tab: the `Tab` the event was received on if available.
         :param ev: the `LoadingFailed` event.
         """
         pass
 
+    async def on_loading_finished(self,
+        tab: Tab | None,
+        ev: cdp.network.LoadingFinished,
+        request_will_be_sent: cdp.network.RequestWillBeSent,
+    ):
+        """
+        handle a `LoadingFinished` event
+
+        :param tab: the `Tab` the event was received on if available.
+        :param ev: the `LoadingFinished` event.
+        :param request_will_be_sent: original request event if available.
+        """
+        pass
+
+    async def on_data_received(self,
+        tab: Tab | None,
+        ev: cdp.network.DataReceived,
+        request_will_be_sent: cdp.network.RequestWillBeSent,
+    ):
+        """handle a high-frequency `DataReceived` event
+
+        careful: this can be emitted many times per request. keep logic lightweight.
+
+        :param tab: the `Tab` the event was received on if available.
+        :param ev: the `DataReceived` event.
+        :param request_will_be_sent: original request event if available.
+        """
+        pass
+
     async def on_request(self,
-        tab: Tab,
+        tab: Tab | None,
         ev: cdp.network.RequestWillBeSent,
         extra_info: cdp.network.RequestWillBeSentExtraInfo | None,
     ):
         """
         handle a `RequestWillBeSent` event
 
-        :param tab: the `Tab` the event was received on.
+        :param tab: the `Tab` the event was received on if available.
         :param ev: the `RequestWillBeSent` event.
         :param extra_info: the `RequestWillBeSentExtraInfo` event, if available.
         """
@@ -129,19 +164,30 @@ class TargetInterceptorManager:
     def __init__(self, 
         session: Tab | Connection | Browser = None, 
         interceptors: list[TargetInterceptor] = None,
-        network_watchers: list[NetworkWatcher] = None
+        network_watchers: list[NetworkWatcher] = None,
+        request_paused_handler: type[RequestPausedHandler] | None = None,
+        *,
+        remove_range_header: bool = False,
     ):
         """init TargetInterceptorManager
 
         for now, each `TargetInterceptorManager` can only have one session
+        and one `RequestPausedHandler` subclass. (uninitiated)
 
         :param session: the session that you want to add `TargetInterceptor`'s to.
         :param interceptors: a list of `TargetInterceptor`'s to add to the manager.
         :param network_watchers: a list of `NetworkWatcher`'s to add to the manager.
+        :param request_paused_handler: optional `RequestPausedHandler` subclass to use for request interception.
+        **NOTE**: must be an ***uninitiated*** class, not an already created instance: e.g. **`RequestPausedHandler`** *not* `RequestPausedHandler()`.
+        :type request_paused_handler: type[RequestPausedHandler]
+        :param remove_range_header: whether to remove `Range` headers from intercepted requests (default: False).
         """
         self.connection = session.connection if isinstance(session, Browser) else session
         self.interceptors = interceptors or []
         self.network_watchers = network_watchers or []
+        self.request_paused_handler = request_paused_handler
+        self.remove_range_header = remove_range_header
+        # state
         self.request_ids_to_tab: dict[str, Tab] = {}
         self.request_sent_events: dict[str, cdp.network.RequestWillBeSent] = {}
         self.response_received_events: dict[str, cdp.network.ResponseReceived] = {}
@@ -152,16 +198,19 @@ class TargetInterceptorManager:
         self._stopped = False
         # mapping of CDP event types to manager handler callables
         # allows central dispatch and simpler customization
-        self.handler_mappings: dict[type, Callable[[object], Awaitable[None]]] = {
-            cdp.target.AttachedToTarget: self.on_attach,
-            cdp.target.TargetInfoChanged: self.on_change_interceptors,
+        self.network_watcher_mappings: dict[type, Callable[[object], Awaitable[None]]] = {
             cdp.network.LoadingFailed: self.on_loading_failed,
+            cdp.network.LoadingFinished: self.on_loading_finished,
+            cdp.network.DataReceived: self.on_data_received,
             cdp.network.RequestWillBeSent: self.on_request_will_be_sent,
             cdp.network.RequestWillBeSentExtraInfo: self.on_request_will_be_sent_extra_info,
             cdp.network.ResponseReceived: self.on_response_received,
             cdp.network.ResponseReceivedExtraInfo: self.on_response_received_extra_info,
         }
-
+        self.target_interceptor_mappings: dict[type, Callable[[object], Awaitable[None]]] = {
+            cdp.target.AttachedToTarget: self.on_attach,
+            cdp.target.TargetInfoChanged: self.on_change_interceptors,
+        }
 
     async def _dispatch_event(self, ev: object):
         """central dispatcher that looks up the handler in `self.handler_mappings`
@@ -172,7 +221,10 @@ class TargetInterceptorManager:
         event_type = type(ev)
         if self._stopped:
             return
-        handler = self.handler_mappings.get(event_type)
+        handler = (
+            self.network_watcher_mappings.get(event_type)
+            or self.target_interceptor_mappings.get(event_type)
+        )
         if handler is None:
             logger.debug("no handler mapped for %s", event_type)
             return
@@ -181,6 +233,8 @@ class TargetInterceptorManager:
             msg += f" on {ev.target_info.type_} <{ev.target_info.url}>:"
         else:
             msg += ":"
+        if logger.getEffectiveLevel() <= logging.DEBUG:
+            msg += f"\n    {ev}"
         def _log_exc_debug(msg, *a):
             logger.debug(msg, *a, exc_info=True)
         def _log_exc_warning(msg, *a):
@@ -194,8 +248,9 @@ class TargetInterceptorManager:
                 for frame in extracted:
                     frame_file = os.path.normcase(os.path.normpath(frame.filename))
                     if frame_file != current_file:
-                        msg += f"\n{frame.filename}:{frame.lineno} in {frame.name}:\n"
+                        msg += f"\n  {frame.filename}:{frame.lineno}:\n"
                         break
+                msg += f"    {e}\n"
                 raise e
         except (
             websockets.exceptions.ConnectionClosedOK, 
@@ -210,12 +265,13 @@ class TargetInterceptorManager:
         except (EOFError, websockets.exceptions.InvalidMessage):
             _log_exc_debug("%s websocket handshake/parse already closed.", msg)
         except Exception as e:
-            if "-32000" in str(e):
-                _log_exc_warning("%s execution context not created yet.", msg)
-            elif "-32001" in str(e):
-                _log_exc_warning("%s session not found. (potential timing issue?)", msg)
-            elif "-32601" in str(e):
-                _log_exc_debug("%s method not found.", msg)
+            se = str(e)
+            if (
+                "-32000" in se
+                or "-32001" in se
+                or "-32601" in se
+            ):
+                _log_exc_warning(msg)
             else:
                 logger.exception(msg)
 
@@ -236,7 +292,7 @@ class TargetInterceptorManager:
             {"type": "iframe", "exclude": True} # can't figure this one out yet
         ]
 
-        if ev:
+        if (ev and ev.session_id is not None):
             msg = f"{ev.target_info.type_} <{ev.target_info.url}>"
             session_id = ev.session_id
             # service workers will show up twice if allowed to populate on Page events
@@ -251,6 +307,29 @@ class TargetInterceptorManager:
                         logger.warning("%s session not found. (potential timing issue?)", network_msg)
                     else:
                         logger.exception(network_msg)
+                tab = next((t for t in connection.browser.tabs if t.target_id == ev.target_info.target_id), None)
+                for ev_type in self.network_watcher_mappings.keys():
+                    tab.add_handler(ev_type, self._dispatch_event)
+                logger.debug("(discovered tab) current request_paused_handler: %s", self.request_paused_handler)
+                if self.request_paused_handler:
+                    rph = self.request_paused_handler(
+                        tab=tab,
+                        remove_range_header=self.remove_range_header,
+                    )
+                    logger.debug("starting request paused handler %s on %s", rph, tab)
+                    await rph.start()
+        elif isinstance(connection, Tab):
+            msg = f"page <{connection.url}>"
+            for ev_type in self.network_watcher_mappings.keys():
+                connection.add_handler(ev_type, self._dispatch_event)
+            logger.debug("(self.connection) current request_paused_handler: %s", self.request_paused_handler)
+            if self.request_paused_handler:
+                rph = self.request_paused_handler(
+                    tab=connection,
+                    remove_range_header=self.remove_range_header,
+                )
+                logger.debug("starting request paused handler %s on %s", rph, connection)
+                await rph.start()
         else:
             msg = connection
             session_id = None
@@ -264,7 +343,7 @@ class TargetInterceptorManager:
                 flatten=True,
                 filter_=cdp.target.TargetFilter(filters)
             ), session_id)
-            logger.debug("successfully set auto attach for %s", attach_msg)
+            logger.debug("successfully set auto attach for %s", msg)
         except websockets.exceptions.ConnectionClosedError:
             logger.debug("%s browser already closed.", attach_msg)
         except Exception as e:
@@ -289,8 +368,8 @@ class TargetInterceptorManager:
             return
         tab = next((t for t in self.connection.browser.tabs if t.target_id == ev.frame_id), None)
         if tab is None:
-            logger.debug("no tab found for ResponseReceived <%s> with target_id %s", ev.response.url, ev.frame_id)
-            return
+            logger.debug("no tab found for ResponseReceived <%s> with target_id %s\n  %s", ev.response.url, ev.frame_id, ev.__dict__)
+
         for handler in self.network_watchers:
             await handler.on_response(tab, ev, self.responses_extra_info.get(ev.request_id))
         self.responses_extra_info.pop(ev.request_id, None)
@@ -305,12 +384,44 @@ class TargetInterceptorManager:
             return
         tab = self.request_ids_to_tab.get(ev.request_id)
         if tab is None:
-            logger.debug("no tab found for LoadingFailed with request_id %s", ev.request_id)
-            return
+            logger.debug("no tab found for LoadingFailed with request_id %s\n  %s", ev.request_id, ev.__dict__)
 
         for handler in self.network_watchers:
             await handler.on_loading_failed(tab, ev, self.request_sent_events.get(ev.request_id))
         self.request_ids_to_tab.pop(ev.request_id, None)
+
+    async def on_loading_finished(self, ev: cdp.network.LoadingFinished):
+        """CDP handler fired when a network request successfully finished loading.
+
+        passes the event to all `NetworkWatcher.on_loading_finished` handlers.
+        """
+        if self._stopped:
+            return
+        tab = self.request_ids_to_tab.get(ev.request_id)
+        if tab is None:
+            logger.debug("no tab found for LoadingFinished with request_id %s\n  %s", ev.request_id, ev.__dict__)
+
+        for handler in self.network_watchers:
+            await handler.on_loading_finished(tab, ev, self.request_sent_events.get(ev.request_id))
+        # cleanup to avoid leaks
+        self.request_ids_to_tab.pop(ev.request_id, None)
+        self.request_sent_events.pop(ev.request_id, None)
+
+    async def on_data_received(self, ev: cdp.network.DataReceived):
+        """CDP handler fired when a network request receives a data chunk.
+
+        passes the event to all `NetworkWatcher.on_data_received` handlers.
+        this is high-frequency; watchers must stay lightweight.
+        """
+        if self._stopped:
+            return
+        tab = self.request_ids_to_tab.get(ev.request_id)
+        if tab is None:
+            logger.debug("no tab found for DataReceived with request_id %s\n  %s", ev.request_id, ev.__dict__)
+
+        original = self.request_sent_events.get(ev.request_id)
+        for handler in self.network_watchers:
+            await handler.on_data_received(tab, ev, original)
 
 
     async def on_response_received_extra_info(self, ev: cdp.network.ResponseReceivedExtraInfo):
@@ -321,8 +432,12 @@ class TargetInterceptorManager:
         if self._stopped:
             return
         self.responses_extra_info[ev.request_id] = ev
+        tab = self.request_ids_to_tab.get(ev.request_id)
+        if tab is None:
+            logger.debug("no tab found for ResponseReceivedExtraInfo with request_id %s\n  %s", ev.request_id, ev.__dict__)
+
         for handler in self.network_watchers:
-            await handler.on_response_extra_info(ev)
+            await handler.on_response_extra_info(tab, ev)
 
 
     async def on_request_will_be_sent(self, ev: cdp.network.RequestWillBeSent):
@@ -334,10 +449,10 @@ class TargetInterceptorManager:
             return
         tab = next((t for t in self.connection.browser.tabs if t.target_id == ev.frame_id), None)
         if tab is None:
-            logger.debug("no tab found for RequestWillBeSent <%s> with target_id %s", ev.request.url, ev.frame_id)
-            return
+            logger.debug("no tab found for RequestWillBeSent <%s> with target_id %s\n  %s", ev.request.url, ev.frame_id, ev.__dict__)
+
         self.request_ids_to_tab[ev.request_id] = tab
-        # store the request event so LoadingFailed handlers can access original url
+        # store the request event so response handlers can access original event
         self.request_sent_events[ev.request_id] = ev
         for handler in self.network_watchers:
             await handler.on_request(tab, ev, self.requests_extra_info.get(ev.request_id))
@@ -348,6 +463,8 @@ class TargetInterceptorManager:
         """CDP handler fired when extra information about a network request is received.
 
         passes the event to all `NetworkWatcher.on_request_extra_info` handlers.
+
+        seems like this is always sent before `RequestWillBeSent`?
         """
         if self._stopped:
             return
@@ -371,7 +488,7 @@ class TargetInterceptorManager:
         connection = self.target_id_to_connection.get(ev.target_info.target_id) or self.connection
         for interceptor in self.interceptors:
             ev.session_id = None
-            logger.debug("calling interceptor (on_change) %s to %s", interceptor, target_msg)
+            logger.debug("calling interceptor (on_change) %s on %s", interceptor, target_msg)
             await interceptor.on_change(connection, ev)
 
 
@@ -395,9 +512,9 @@ class TargetInterceptorManager:
             return
         for interceptor in self.interceptors:
             if ev:
-                msg = f"{interceptor} to {target_msg}"
+                msg = f"{interceptor} on {target_msg}"
             else:
-                msg = f"{interceptor} to {self.connection}"
+                msg = f"{interceptor} on {self.connection}"
             logger.debug("calling interceptor (on_attach) %s", msg)
             await interceptor.on_attach(self.connection, ev)
 
@@ -462,7 +579,7 @@ class TargetInterceptorManager:
         setattr(connection, "_target_interceptor_manager_initialized", True)
 
         # register all mapped handlers to route through the central dispatcher
-        for ev_type in self.handler_mappings.keys():
+        for ev_type in self.target_interceptor_mappings.keys():
             connection.add_handler(ev_type, self._dispatch_event)
         await self.set_hook(None)
 
@@ -476,7 +593,7 @@ class TargetInterceptorManager:
             return
         self._stopped = True
         # remove handlers we previously added to avoid further callback dispatch after websocket closes
-        for ev_type in self.handler_mappings.keys():
+        for ev_type in self.target_interceptor_mappings.keys():
             self.connection.remove_handler(ev_type, self._dispatch_event)
         
         for watcher in self.network_watchers:

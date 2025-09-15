@@ -7,7 +7,7 @@ from typing import Callable
 import nodriver
 
 # from .pause_handlers import ScrapeRequestPausedHandler
-from .scrape_result import ScrapeResultHandler, CrawlResultHandler
+from .handlers.result import ScrapeResultHandler, CrawlResultHandler
 from .tab import crawl, scrape
 
 logger = logging.getLogger("nodriverplus.Manager")

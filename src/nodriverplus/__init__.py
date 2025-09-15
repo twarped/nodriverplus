@@ -1,7 +1,7 @@
 from .core.nodriverplus import NodriverPlus
 from .core.manager import Manager, ManagerJob
 from .core.user_agent import UserAgent
-from .core.scrape_result import (
+from .core.handlers.result import (
     CrawlResult, 
     CrawlResultHandler, 
     ScrapeResult, 
@@ -9,13 +9,19 @@ from .core.scrape_result import (
     InterceptedResponseMeta, 
     InterceptedRequestMeta
 )
-from .core.handlers import (
+from .core.handlers.request_paused import (
+    RequestPausedHandler,
+    RequestMeta
+)
+from .core.handlers.target_intercepted import (
     NetworkWatcher,
     TargetInterceptor,
-    TargetInterceptorManager,
+    TargetInterceptorManager
+)
+from .core.handlers.stock import (
     UserAgentPatch,
     WindowSizePatch,
-    CloudflareSolver,
+    CloudflareSolver
 )
 from . import utils
 import nodriver
@@ -56,6 +62,8 @@ __all__ = [
     "NetworkWatcher",
     "TargetInterceptor",
     "TargetInterceptorManager",
+    "RequestPausedHandler",
+    "RequestMeta",
     "UserAgentPatch",
     "WindowSizePatch",
     "CloudflareSolver",

@@ -18,7 +18,7 @@ from nodriver import cdp
 from urllib.parse import urlparse
 from ..utils import fix_url, extract_links
 from ..js.load import load_text as load_js
-from .scrape_result import (
+from .handlers.result import (
     ScrapeResult, 
     ScrapeResultHandler, 
     CrawlResult,
@@ -140,7 +140,6 @@ async def crawl(
     :param max_pages: hard cap on processed pages.
     :param collect_results: store every ScrapeResult object.
     :param delay_range: (min,max) jitter before first scrape per worker loop.
-    :param tab_close_timeout: seconds to wait closing a tab.
     :param proxy_server: (EXPERIMENTAL) (Optional) Proxy server, similar to the one passed to --proxy-server
     :param proxy_bypass_list: (EXPERIMENTAL) (Optional) Proxy bypass list, similar to the one passed to --proxy-bypass-list
     :param origins_with_universal_network_access: (EXPERIMENTAL) (Optional) An optional list of origins to grant unlimited cross-origin access to. Parts of the URL other than those constituting origin are ignored.
@@ -547,12 +546,13 @@ async def click_template_image(
     then the embedded shifts will be applied unless 
     `x_shift` or `y_shift` are explicitly set to non-zero values.
 
-    :param tab: target nodriver Tab.
+    :param tab: target nodriver `Tab`.
     :param template: path or filename of the template image.
-    :param x_shift: horizontal shift in css pixels to apply to the computed click point.
-    :param y_shift: vertical shift in css pixels to apply to the computed click point.
+    :param x_shift: horizontal shift in image pixels to apply to the computed click point.
+    :param y_shift: vertical shift in image pixels to apply to the computed click point.
     :param save_annotated_screenshot: if set, save an annotated screenshot with the matched template.
-    :param flash_point: if True, flash the click location after clicking.
+    :param flash_point: if `True`, flash the click location after clicking. **NOTE**: may affect
+    quick subsequent screenshots.
     :param match_threshold: only issue a click if the template match exceeds this threshold (0.0-1.0).
     """
 
@@ -588,9 +588,26 @@ async def click_template_image(
     xe, ye = xs + tw, ys + th
     cx_img = (xs + xe) // 2
     cy_img = (ys + ye) // 2
-    # apply shifts (shift already in image pixel space; adjust for dpr afterwards)
-    cx_shifted = cx_img + int(x_shift * dpr)
-    cy_shifted = cy_img + int(y_shift * dpr)
+    # apply shifts (shifts are expressed in image pixels — do not multiply by DPR)
+    cx_shifted = cx_img + int(x_shift)
+    cy_shifted = cy_img + int(y_shift)
+    # log numeric debug info to help diagnose coordinate mismatches
+    logger.debug(
+        "template match %s: match=%.1f%% xs=%d ys=%d xe=%d ye=%d center_img=(%d,%d) shifted_img=(%d,%d) dpr=%.2f x_shift_img=%d y_shift_img=%d",
+        tpl_path.name,
+        match_pct,
+        int(xs),
+        int(ys),
+        int(xe),
+        int(ye),
+        int(cx_img),
+        int(cy_img),
+        int(cx_shifted),
+        int(cy_shifted),
+        dpr,
+        x_shift,
+        y_shift,
+    )
     h, w = scr.shape[:2]
     cx_shifted = max(0, min(cx_shifted, w - 1))
     cy_shifted = max(0, min(cy_shifted, h - 1))
@@ -612,7 +629,7 @@ async def click_template_image(
 
     if match_pct / 100.0 < match_threshold:
         logger.debug(
-            "skipping template %s: match=%.1f%% img=(%d,%d) css=(%.1f,%.1f) dpr=%.2f shift=(%d,%d)",
+            "skipping template %s: match=%.1f%% img=(%d,%d) css=(%.1f,%.1f) dpr=%.2f shift_img=(%d,%d)",
             tpl_path.name,
             match_pct,
             cx_shifted,
@@ -630,7 +647,7 @@ async def click_template_image(
     css_y = cy_shifted / (dpr or 1.0)
     await tab.mouse_click(css_x, css_y)
     logger.debug(
-        "successfully clicked best match coords for %s: match=%.1f%% img=(%d,%d) css=(%.1f,%.1f) dpr=%.2f shift=(%d,%d)",
+        "successfully clicked best match coords for %s: match=%.1f%% img=(%d,%d) css=(%.1f,%.1f) dpr=%.2f shift_img=(%d,%d)",
         tpl_path.name,
         match_pct,
         cx_shifted,

@@ -9,6 +9,15 @@ from .stock import (
     WindowSizePatch,
     CloudflareSolver,
 )
+from .result import (
+    ScrapeResult,
+    ScrapeResultHandler,
+    CrawlResult,
+    CrawlResultHandler,
+    InterceptedResponseMeta,
+    InterceptedRequestMeta,
+)
+from .request_paused import RequestPausedHandler
 
 __all__ = [
     "UserAgentPatch",
@@ -18,4 +27,11 @@ __all__ = [
     "WindowSizePatch",
     # "ScrapeRequestPausedHandler",
     "CloudflareSolver",
+    "ScrapeResult",
+    "ScrapeResultHandler",
+    "CrawlResult",
+    "CrawlResultHandler",
+    "InterceptedResponseMeta",
+    "InterceptedRequestMeta",
+    "RequestPausedHandler",
 ]

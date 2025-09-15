@@ -30,6 +30,10 @@ this library is mostly just a working proof of concept as of now, and will need 
 - [ ] add option to receive bytes as stream on `ScrapeResult` instead of a cached var
 - [ ] update `CrawlResultHandler` and `Manager` to handle errors and stuff
 - [ ] make `pymupdf` optional
+    - [ ] expose `on_data_received` (follow up to new `on_loading_finished`)
+- [ ] figure out why the freak opening up a browser in headful mode and then searching something on google makes it so that i stop receiving response received events
+- [ ] batch image matching and best match clicking (basically make that more efficient)
+- [ ] pre process stock cloudflare images
 
 # usage
 
@@ -62,6 +66,26 @@ ndp = NodriverPlus()
 await ndp.start()
 await ndp.stop()
 ```
+
+### writing a custom NetworkWatcher
+
+`TargetInterceptorManager` dispatches `LoadingFinished` and high-frequency `DataReceived` events in addition to existing `RequestWillBeSent`, `ResponseReceived`, and `LoadingFailed` events. You can subclass `NetworkWatcher` and override any of:
+
+```python
+from nodriverplus import NetworkWatcher
+
+class MyWatcher(NetworkWatcher):
+    async def on_request(self, tab, ev, extra):
+        print("req", ev.request.url)
+    async def on_data_received(self, tab, ev, request_will_be_sent):
+        # careful: very chatty
+        if request_will_be_sent and ev.data_length:
+            print("chunk", request_will_be_sent.request.url, ev.data_length)
+    async def on_loading_finished(self, tab, ev, request_will_be_sent):
+        print("finished", request_will_be_sent.request.url if request_will_be_sent else ev.request_id)
+```
+
+Pass an instance into `NodriverPlus(interceptors=[...], network_watchers=[MyWatcher()])` or build a `TargetInterceptorManager` manually.
 
 example if you want to scrape:
 ```python

@@ -3,7 +3,7 @@ import asyncio
 import nodriver
 import time
 from datetime import timedelta
-from .scrape_result import (
+from .handlers.result import (
     ScrapeResult, 
 )
 

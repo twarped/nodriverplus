@@ -12,7 +12,7 @@ import logging
 import nodriver
 
 from ..request_paused import RequestPausedHandler
-from ...scrape_result import ScrapeResult, InterceptedResponseMeta, InterceptedRequestMeta
+from ..result import ScrapeResult, InterceptedResponseMeta, InterceptedRequestMeta
 import base64
 
 logger = logging.getLogger("nodriverplus.ScrapeRequestPausedHandler")

@@ -1,57 +1,99 @@
 from __future__ import annotations
 
+
+# probably pretty accurate as of chrome 140+, but this was generated
+# by GPT-5 Thinking Deep-Research rather than me creating this from
+# chromium source code... but it seems to work just fine.
 TARGET_DOMAINS_RAW: dict[str, list[str] | str] = {
-    # top-level (browser) target
+    # --- Browser (top-level) target ---
     "browser": [
-        "Browser", "Target", "IO", "SystemInfo",
-        "Tethering", "Tracing", "Memory", "Log",
+        # Browser/global control & discovery
+        "Browser", "Target", "SystemInfo", "Tethering", "IO",
+        # Tracing & memory instrumentation that can run at browser level
+        "Tracing", "Memory",
+        # Misc/admin-ish domains commonly usable from the browser session
+        "Cast", "HeadlessExperimental", "Log",
     ],
 
-    # page-like targets
+    # --- Page-like targets (tabs, extension pages, webviews, etc.) ---
     "page": [
-        "Page", "DOM", "CSS", "Runtime", "Network",
-        "Performance", "Profiler", "Accessibility",
-        "Overlay", "Emulation", "Log", "Security",
-        "Animation", "Preload", "Fetch", "DOMDebugger",
-        "DOMSnapshot", "LayerTree", "PerformanceTimeline",
-        "Tracing", "Input", "Media", "Storage",
-        "IndexedDB", "CacheStorage",
+        # Core page+renderer control
+        "Page", "Runtime", "Debugger", "Console", "Log",
+        # DOM/CSS stack
+        "DOM", "CSS", "DOMDebugger", "DOMSnapshot", "DOMStorage",
+        # Networking & request interception (page/renderer scope)
+        "Network", "Fetch",
+        # Performance / timeline / profiling
+        "Performance", "PerformanceTimeline", "Profiler", "HeapProfiler", "Tracing", "Memory",
+        # Rendering / visuals
+        "Animation", "Overlay", "LayerTree",
+        # Emulation & input
+        "Emulation", "Input", "DeviceOrientation",
+        # Security / storage
+        "Security", "Storage", "IndexedDB", "CacheStorage",
+        # Media & platform features
+        "Media", "WebAudio", "WebAuthn", "BluetoothEmulation", "DeviceAccess",
+        # Loading & preload hints
+        "Preload",
+        # UX and A11y
+        "Accessibility",
+        # Identity / permissions flows
+        "FedCm",
+        # Extensions & PWA-related hooks (exposed for extension/app targets)
+        "Extensions", "PWA",
+        # Cast control from page context (supported in Chromium)
+        "Cast",
+        # Misc protocol plumbing
+        "Inspector", "Target", "IO",
+        # Audits (protocol surface exists; availability may vary by channel)
+        "Audits",
     ],
     "tab":             "page",
     "webview":         "page",
     "guest":           "page",
     "background_page": "page",
     "app":             "page",
+    "other":           "page",
 
-    "other":           "page", 
-
-    # frames / workers
+    # --- Frames / iframes ---
+    # Note: subframes do NOT expose Page.*; Network events roll up to the tab/page.
     "iframe": [
-        "DOM", "CSS", "Runtime", "Network",
-        "Animation", "Performance", "Log",
-        "DOMDebugger", "DOMSnapshot", "LayerTree",
-        "Debugger",
+        "Runtime", "Debugger", "Console", "Log",
+        "DOM", "CSS", "DOMDebugger", "DOMSnapshot",
+        "LayerTree",
+        "Animation",
+        "Performance", "PerformanceTimeline",
+        # Keep this renderer-scoped; omit Page/Network/Input here.
     ],
-    "dedicated_worker": [
-        "Runtime", "Debugger", "Log", "Profiler",
-    ],
+
+    # --- Workers ---
+    # Dedicated worker (CDP type "worker"); shared & service workers below.
     "worker": [
-        "Runtime", "Debugger", "Log", "Profiler",
+        "Runtime", "Debugger", "Console", "Log",
+        "Profiler", "HeapProfiler",
+        # Intentionally exclude Network/Fetch here; Chromium does not expose
+        # Fetch.enable to worker sessions.
     ],
-    "shared_worker": [
-        "Runtime", "Debugger", "Log", "Profiler",
-    ],
+    "dedicated_worker": "worker",
+    "shared_worker":    "worker",
+
+    # --- Service workers (adds ServiceWorker domain) ---
     "service_worker": [
-        "Runtime", "Debugger", "Log", "Profiler", "ServiceWorker",
+        "Runtime", "Debugger", "Console", "Log",
+        "Profiler", "HeapProfiler",
+        "ServiceWorker",
     ],
+
+    # --- Worklets ---
+    # Worklets are very restricted: execution + logs; debugger support varies by channel.
     "worklet": [
-        "Runtime", "Log",
+        "Runtime", "Console", "Log",
     ],
     "shared_storage_worklet": [
-        "Runtime", "Log",
+        "Runtime", "Console", "Log",
     ],
     "auction_worklet": [
-        "Runtime", "Log",
+        "Runtime", "Console", "Log",
     ],
 }
 

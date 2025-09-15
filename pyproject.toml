@@ -28,9 +28,6 @@ pdfs = [
 requires = ["uv_build>=0.8.0,<0.9"]
 build-backend = "uv_build"
 
-[tool.uv.sources]
-nodriver = { git = "https://github.com/twarped/nodriver" }
-
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -53,3 +50,6 @@ filterwarnings = [
     "ignore:.*SwigPyObject has no __module__ attribute:DeprecationWarning",
     "ignore:.*swigvarlink has no __module__ attribute:DeprecationWarning",
 ]
+
+[tool.uv.sources]
+nodriver = { git = "https://github.com/twarped/nodriver" }

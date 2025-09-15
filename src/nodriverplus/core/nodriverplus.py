@@ -10,19 +10,25 @@ wraps nodriver to add:
 keeps low-level access to the underlying nodriver Browser so callers can still drive CDP directly.
 definitely still needs work tho
 """
+
 import logging
 import os
 import nodriver
 from types import CoroutineType
 from nodriver import Config
 from .user_agent import *
-from .scrape_result import *
+from .handlers.result import *
 from .tab import get_user_agent, scrape, crawl
 from .browser import get, get_with_timeout, stop
 from .manager import Manager
-from .handlers import TargetInterceptor, TargetInterceptorManager, NetworkWatcher
+from .handlers import (
+    TargetInterceptor,
+    TargetInterceptorManager,
+    NetworkWatcher,
+    RequestPausedHandler,
+)
 from .handlers.stock import (
-    UserAgentPatch, 
+    UserAgentPatch,
     # not working as intended currently
     # ScrapeRequestPausedHandler,
     WindowSizePatch,
@@ -36,57 +42,84 @@ class NodriverPlus:
     """high-level orchestrator for starting a stealthy browser and performing scrapes/crawls.
 
     lifecycle:
-    1. `start()`: launch chrome and fetch + patch user agent
-    2. `scrape()`: navigate + capture html / links / headers / optional bytes
-    3. `crawl()`: customizable nodriver crawling API with depth + concurrency + handler-produced link expansion
-    4. `stop()`: shutdown underlying process (optional graceful wait)
+    1. `start()`: launch chrome and apply stock + custom interceptors + watchers if specified
+    - `get()`: acquire new/reused tabs/windows/contexts
+    - `get_with_timeout()`: navigate with separate navigation + load timeouts
+    - `scrape()`: navigate + capture html / links / headers / optional bytes
+    - `crawl()`: customizable nodriver crawling API with depth + concurrency + handler-produced link expansion
+    - `enqueue_scrape()`: enqueue a background scrape job using the internal `Manager`
+    - `enqueue_crawl()`: enqueue a background crawl job using the internal `Manager`
+    2. `stop()`: shutdown underlying process (optional graceful wait)
+    - `wait_for_queue()`: await completion of all queued manager jobs
+    - `stop_manager()`: stop the internal `Manager` loop if running
 
     ua patching: applies Network + Emulation overrides + runtime JS patch to sync navigator.* / userAgentData.
     """
+
     browser: nodriver.Browser
     config: nodriver.Config
     user_agent: UserAgent
     interceptor_manager: TargetInterceptorManager
 
-    def __init__(self, 
-        user_agent: UserAgent = None, 
-        hide_headless: bool = True, 
+    def __init__(
+        self,
+        user_agent: UserAgent = None,
+        hide_headless: bool = True,
         solve_cloudflare: bool = True,
         *,
         save_annotated_screenshot: str | os.PathLike = None,
         interceptors: list[TargetInterceptor] = None,
         network_watchers: list[NetworkWatcher] = None,
+        request_paused_handler: type[RequestPausedHandler] | None = None,
         manager_concurrency: int = 1,
     ):
         """initialize a `NodriverPlus` instance
-        
-        :param user_agent: `UserAgent` to patch browser with 
-        using stock interceptor: `UserAgentInterceptor`
 
+        :param user_agent: `UserAgent` to patch browser with
+        using stock interceptor: `UserAgentInterceptor`
+        :param hide_headless: scrub "Headless" tokens from user agent and runtime when `True`
+        :param solve_cloudflare: add `CloudflareSolver(save_annotated_screenshot)` to
+        `self.interceptor_manager.network_watchers` when `True`
+        :param save_annotated_screenshot: if `solve_cloudflare` is `True`, path to save
+        annotated screenshot of challenge pages (default: `None`, no screenshot)
         :param interceptors: list of additional custom interceptors to apply
+        :param network_watchers: list of additional custom network watchers to apply
+        :param request_paused_handler: custom `cdp.fetch.RequestPaused` event handler
+        type/class (uninitialized) to apply to all tabs. defaults to `None`. **must be a type**—not an instance—so that it can be initiated later with the correct values attached
+        :type request_paused_handler: type[RequestPausedHandler]
+        :param manager_concurrency: default concurrency for internal `Manager` instance
         """
         self.config = Config()
         self.browser = None
         self.user_agent = user_agent
         self.hide_headless = hide_headless
         # init interceptor manager and add provided + stock interceptors
-        interceptor_manager = TargetInterceptorManager(interceptors, network_watchers)
+        # and request paused handler
+        interceptor_manager = TargetInterceptorManager(
+            interceptors=interceptors,
+            network_watchers=network_watchers,
+            request_paused_handler=request_paused_handler,
+        )
         if user_agent:
-            interceptor_manager.interceptors.append(UserAgentPatch(user_agent, hide_headless))
+            interceptor_manager.interceptors.append(
+                UserAgentPatch(user_agent, hide_headless)
+            )
         if solve_cloudflare:
-            interceptor_manager.network_watchers.append(CloudflareSolver(save_annotated_screenshot))
+            interceptor_manager.network_watchers.append(
+                CloudflareSolver(save_annotated_screenshot)
+            )
         self.interceptor_manager = interceptor_manager
         # dedicated queue manager (jobs provide their own per-job crawl/scrape concurrency)
         self.manager = Manager(concurrency=manager_concurrency)
 
-
     # TODO: make a `WindowSize` dataclass that can be passed
     # so that users can specify other meta like
     # `device_scale_factor`, `mobile`, and `orientation`
-    async def start(self,
+    async def start(
+        self,
         config: Config | None = None,
         *,
-        window_size: tuple[int, int] | None = (1920, 1080),
+        window_size: tuple[int, int] | None = None,
         user_data_dir: os.PathLike | None = None,
         headless: bool | None = False,
         browser_executable_path: os.PathLike | None = None,
@@ -128,14 +161,11 @@ class NodriverPlus:
             width, height = window_size
             # remove any existing --window-size arg to avoid dupes
             browser_args = [
-                arg for arg in browser_args
-                if not arg.startswith("--window-size=")
+                arg for arg in browser_args if not arg.startswith("--window-size=")
             ]
             browser_args.append(f"--window-size={width},{height}")
             # add interceptor to manager
-            self.interceptor_manager.interceptors.append(
-                WindowSizePatch(width, height)
-            )
+            self.interceptor_manager.interceptors.append(WindowSizePatch(width, height))
 
         self.browser = await nodriver.start(
             config,
@@ -148,7 +178,7 @@ class NodriverPlus:
             host=host,
             port=port,
             expert=expert,
-            **kwargs
+            **kwargs,
         )
 
         # get user agent if none specified
@@ -156,16 +186,15 @@ class NodriverPlus:
             user_agent = await get_user_agent(self.browser.main_tab)
             self.user_agent = user_agent
         # just in case they added self.user_agent outside of `__init__()`
-        if not any(isinstance(i, UserAgentPatch) for i in self.interceptor_manager.interceptors):
+        if not any(
+            isinstance(i, UserAgentPatch) for i in self.interceptor_manager.interceptors
+        ):
             self.interceptor_manager.interceptors.append(
                 UserAgentPatch(self.user_agent, self.hide_headless)
             )
 
         await UserAgentPatch.patch_user_agent(
-            self.browser.main_tab, 
-            None,
-            self.user_agent,
-            self.hide_headless
+            self.browser.main_tab, None, self.user_agent, self.hide_headless
         )
 
         if window_size:
@@ -185,29 +214,28 @@ class NodriverPlus:
 
         return self.browser
 
-
-    async def crawl(self,
+    async def crawl(
+        self,
         url: str,
         scrape_result_handler: ScrapeResultHandler = None,
         depth: int | None = 1,
         crawl_result_handler: CrawlResultHandler = None,
         *,
-        new_window = False,
+        new_window=False,
         # scrape_bytes = True,
-        navigation_timeout = 30,
-        wait_for_page_load = True,
-        page_load_timeout = 60,
-        extra_wait_ms = 0,
+        navigation_timeout=30,
+        wait_for_page_load=True,
+        page_load_timeout=60,
+        extra_wait_ms=0,
         concurrency: int = 1,
         max_pages: int | None = None,
         collect_results: bool = False,
         delay_range: tuple[float, float] | None = None,
-        # request_paused_handler: ScrapeRequestPausedHandler = None,
     ):
         """customizable crawl API starting at `url` up to `depth`.
 
-        schedules scrape tasks with a worker pool, collects result metadata, errors,
-        links, and timing. handler is invoked for each page producing optional new links.
+        schedules scrape tasks with a worker pool and collects result metadata, errors,
+        links, and timing.
 
         if `crawl_result_handler` is specified, `crawl_result_handler.handle()` will 
         be called and awaited before returning the final `CrawlResult`.
@@ -215,6 +243,11 @@ class NodriverPlus:
         `crawl_result_handler` is nifty if you're crawling with a `Manager`
         instance.
 
+        - **`proxy_server`** — (EXPERIMENTAL) (Optional) Proxy server, similar to the one passed to --proxy-server
+        - **`proxy_bypass_list`** — (EXPERIMENTAL) (Optional) Proxy bypass list, similar to the one passed to --proxy-bypass-list
+        - **`origins_with_universal_network_access`** — (EXPERIMENTAL) (Optional) An optional list of origins to grant unlimited cross-origin access to. Parts of the URL other than those constituting origin are ignored.
+
+        :param base: target tab or browser instance to run crawl on
         :param url: root starting point.
         :param scrape_result_handler: optional `ScrapeResultHandler` to be passed to `scrape()`
         :param depth: max link depth (0 means single page).
@@ -229,7 +262,9 @@ class NodriverPlus:
         :param max_pages: hard cap on processed pages.
         :param collect_results: store every ScrapeResult object.
         :param delay_range: (min,max) jitter before first scrape per worker loop.
-        :param tab_close_timeout: seconds to wait closing a tab.
+        :param proxy_server: (EXPERIMENTAL) (Optional) Proxy server, similar to the one passed to --proxy-server
+        :param proxy_bypass_list: (EXPERIMENTAL) (Optional) Proxy bypass list, similar to the one passed to --proxy-bypass-list
+        :param origins_with_universal_network_access: (EXPERIMENTAL) (Optional) An optional list of origins to grant unlimited cross-origin access to. Parts of the URL other than those constituting origin are ignored.
         :return: crawl summary
         :rtype: CrawlResult
         """
@@ -257,18 +292,18 @@ class NodriverPlus:
             # request_paused_handler=request_paused_handler,
         )
 
-
-    async def scrape(self, 
+    async def scrape(
+        self,
         url: str,
         # scrape_bytes = True,
         scrape_result_handler: ScrapeResultHandler | None = None,
         *,
-        navigation_timeout = 30,
-        wait_for_page_load = True,
-        page_load_timeout = 60,
-        extra_wait_ms = 0,
-        new_tab = False,
-        new_window = False,
+        navigation_timeout=30,
+        wait_for_page_load=True,
+        page_load_timeout=60,
+        extra_wait_ms=0,
+        new_tab=False,
+        new_window=False,
         # request_paused_handler = ScrapeRequestPausedHandler,
         proxy_server: str = None,
         proxy_bypass_list: list[str] = None,
@@ -280,19 +315,16 @@ class NodriverPlus:
         cleanup (tab closure, pending task draining).
 
         if `scrape_result_handler` is provided, `scrape_result_handler.handle()` will
-        be called and awaited before returning the final `ScrapeResult`.
+        be called exactly once and awaited before returning the final `ScrapeResult`.
 
         - **`proxy_server`** — (EXPERIMENTAL) (Optional) Proxy server, similar to the one passed to --proxy-server
         - **`proxy_bypass_list`** — (EXPERIMENTAL) (Optional) Proxy bypass list, similar to the one passed to --proxy-bypass-list
         - **`origins_with_universal_network_access`** — (EXPERIMENTAL) (Optional) An optional list of origins to grant unlimited cross-origin access to. Parts of the URL other than those constituting origin are ignored.
 
-        ### not implemented yet:
-        - `scrape_result_handler` could be useful if you want to execute stuff on `tab`
-        after the page loads, but before the `RequestPausedHandler` is removed
-
+        :param base: reuse provided tab/browser root or create fresh.
         :param url: target url.
-        :param scrape_result_handler: if specified, `scrape_result_handler.handle()` will be called 
-        :param existing_tab: reuse provided tab/browser root or create fresh.
+        :param scrape_bytes: capture non-text body bytes.
+        :param scrape_result_handler: if specified, `scrape_result_handler.handle()` will be called
         and awaited before returning the final `ScrapeResult`.
         :param navigation_timeout: seconds for initial navigation.
         :param wait_for_page_load: await full load event.
@@ -303,14 +335,14 @@ class NodriverPlus:
         :param proxy_server: (EXPERIMENTAL) (Optional) Proxy server, similar to the one passed to --proxy-server
         :param proxy_bypass_list: (EXPERIMENTAL) (Optional) Proxy bypass list, similar to the one passed to --proxy-bypass-list
         :param origins_with_universal_network_access: (EXPERIMENTAL) (Optional) An optional list of origins to grant unlimited cross-origin access to. Parts of the URL other than those constituting origin are ignored.
+        :param current_depth: mostly used by `crawl()` to pass current depth to handlers.
         :return: html/links/bytes/metadata
         :rtype: ScrapeResult
         """
-        # :param scrape_bytes: capture non-text body bytes.
         # :param request_paused_handler: custom fetch interception handler.
         # **must be a type**—not an instance—so that it can be initiated later with the correct values attached
         # :type request_paused_handler: type[ScrapeRequestPausedHandler]
-        
+
         return await scrape(
             base=self.browser,
             url=url,
@@ -325,19 +357,19 @@ class NodriverPlus:
             # request_paused_handler=request_paused_handler,
             proxy_server=proxy_server,
             proxy_bypass_list=proxy_bypass_list,
-            origins_with_universal_network_access=origins_with_universal_network_access
+            origins_with_universal_network_access=origins_with_universal_network_access,
         )
 
-
-    async def get_with_timeout(self, 
-        url: str, 
+    async def get_with_timeout(
+        self,
+        url: str,
         *,
-        navigation_timeout = 30,
-        wait_for_page_load = True,
-        page_load_timeout = 60,
-        extra_wait_ms = 0,
-        new_tab = False,
-        new_window = False
+        navigation_timeout=30,
+        wait_for_page_load=True,
+        page_load_timeout=60,
+        extra_wait_ms=0,
+        new_tab=False,
+        new_window=False,
     ) -> CoroutineType[any, any, ScrapeResult]:
         """navigate with separate navigation + load timeouts.
 
@@ -362,11 +394,11 @@ class NodriverPlus:
             page_load_timeout=page_load_timeout,
             extra_wait_ms=extra_wait_ms,
             new_tab=new_tab,
-            new_window=new_window
+            new_window=new_window,
         )
-    
 
-    async def get(self,
+    async def get(
+        self,
         url: str = "about:blank",
         *,
         new_tab: bool = False,
@@ -380,7 +412,7 @@ class NodriverPlus:
         """central factory for new/reused tabs/windows/contexts.
 
         honors combinations of `new_window`/`new_tab`/`new_context` on `base`.
-        
+
         see https://github.com/twarped/nodriver/commit/1dcb52e8063bad359a3f2978b83f44e20dfbca68
 
         - **`dispose_on_detach`** — (EXPERIMENTAL) (Optional) If specified, disposes this context when debugging session disconnects.
@@ -408,11 +440,10 @@ class NodriverPlus:
             dispose_on_detach=dispose_on_detach,
             proxy_server=proxy_server,
             proxy_bypass_list=proxy_bypass_list,
-            origins_with_universal_network_access=origins_with_universal_network_access
+            origins_with_universal_network_access=origins_with_universal_network_access,
         )
 
-
-    async def stop(self, graceful = True):
+    async def stop(self, graceful=True):
         """stop browser and underlying `Manager` process (optionally wait for graceful exit).
 
         :param graceful: wait for underlying process to exit.
@@ -420,7 +451,6 @@ class NodriverPlus:
         await self.manager.stop()
         await self.interceptor_manager.stop()
         await stop(self.browser, graceful)
-
 
     def enqueue_crawl(self, *args, **kwargs):
         """enqueue a crawl job using the internal `Manager`.
@@ -435,7 +465,6 @@ class NodriverPlus:
             self.manager.start()
         self.manager.enqueue_crawl(self.browser, *args, **kwargs)
 
-
     def enqueue_scrape(self, *args, **kwargs):
         """enqueue a scrape job using the internal `Manager`.
 
@@ -448,18 +477,15 @@ class NodriverPlus:
             self.manager.start()
         self.manager.enqueue_scrape(self.browser, *args, **kwargs)
 
-
     async def wait_for_queue(self, timeout: float | None = None):
         """await completion of all queued manager jobs."""
         await self.manager.wait_for_queue(timeout)
-
 
     async def start_manager(self, concurrency: int | None = None):
         """start the internal `Manager` loop if not already running."""
         if self.manager._runner_task is None:
             self.manager.concurrency = concurrency or self.manager.concurrency
             self.manager.start()
-
 
     async def stop_manager(self, timeout: float | None = None):
         """gracefully stop internal manager and export remaining jobs."""
