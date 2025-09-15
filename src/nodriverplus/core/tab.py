@@ -19,12 +19,13 @@ from urllib.parse import urlparse
 from ..utils import fix_url, extract_links
 from ..js.load import load_text as load_js
 from .handlers.result import (
-    ScrapeResult, 
-    ScrapeResultHandler, 
+    ScrapeResult,
+    ScrapeResultHandler,
     CrawlResult,
-    CrawlResultHandler, 
-    FailedLink
+    CrawlResultHandler,
+    FailedLink,
 )
+
 # from .pause_handlers import ScrapeRequestPausedHandler
 from .user_agent import UserAgent
 from .browser import get, get_with_timeout
@@ -40,14 +41,14 @@ except Exception:  # noqa: broad ok here (missing dep)
     cv2 = None  # type: ignore
     np = None  # type: ignore
 
-    
+
 async def wait_for_page_load(tab: nodriver.Tab, extra_wait_ms: int = 0):
     """wait for load event (or immediate if already complete) then optional delay.
 
     :param tab: target tab.
-    :param extra_wait_ms: additional ms sleep via setTimeout after load.
+    :param extra_wait_ms: additional ms sleep via `setTimeout` after load.
     """
-    
+
     # if the document is already fully loaded, return immediately (about:blank)
     if await tab.evaluate("document.readyState") == "complete":
         return
@@ -61,9 +62,15 @@ async def wait_for_page_load(tab: nodriver.Tab, extra_wait_ms: int = 0):
     tab.add_handler([cdp.page.LoadEventFired], handler=_handler)
     try:
         await ev.wait()
-        logger.info("successfully finished loading %s", getattr(tab, "url", "<unknown>"))
+        logger.info(
+            "successfully finished loading %s", getattr(tab, "url", "<unknown>")
+        )
         if extra_wait_ms:
-            logger.info("waiting extra %d ms for %s", extra_wait_ms, getattr(tab, "url", "<unknown>"))
+            logger.info(
+                "waiting extra %d ms for %s",
+                extra_wait_ms,
+                getattr(tab, "url", "<unknown>"),
+            )
             await asyncio.sleep(extra_wait_ms / 1000)
     finally:
         tab.remove_handler([cdp.page.LoadEventFired], handler=_handler)
@@ -95,12 +102,12 @@ async def crawl(
     depth: int | None = 1,
     crawl_result_handler: CrawlResultHandler = None,
     *,
-    new_window = False,
+    new_window=False,
     # scrape_bytes = True,
-    navigation_timeout = 30,
-    wait_for_page_load = True,
-    page_load_timeout = 60,
-    extra_wait_ms = 0,
+    navigation_timeout=30,
+    wait_for_page_load=True,
+    page_load_timeout=60,
+    extra_wait_ms=0,
     concurrency: int = 1,
     max_pages: int | None = None,
     collect_results: bool = False,
@@ -115,7 +122,7 @@ async def crawl(
     schedules scrape tasks with a worker pool and collects result metadata, errors,
     links, and timing.
 
-    if `crawl_result_handler` is specified, `crawl_result_handler.handle()` will 
+    if `crawl_result_handler` is specified, `crawl_result_handler.handle()` will
     be called and awaited before returning the final `CrawlResult`.
 
     `crawl_result_handler` is nifty if you're crawling with a `Manager`
@@ -128,8 +135,8 @@ async def crawl(
     :param base: target tab or browser instance to run crawl on
     :param url: root starting point.
     :param scrape_result_handler: optional `ScrapeResultHandler` to be passed to `scrape()`
-    :param depth: max link depth (0 means single page).
-    :param crawl_result_handler: if specified, `crawl_result_handler.handle()` 
+    :param depth: max link depth; `0` means single page, `None` for unlimited.
+    :param crawl_result_handler: if specified, `crawl_result_handler.handle()`
     will be called and awaited before returning the final `CrawlResult`.
     :param new_window: isolate crawl in new context+window when True.
     :param navigation_timeout: seconds for initial navigation phase.
@@ -153,9 +160,13 @@ async def crawl(
 
     if scrape_result_handler is None:
         if not collect_results:
-            logger.warning("no `ScrapeResultHandler` provided and collect_results is False, only errors and links will be captured")
+            logger.warning(
+                "no `ScrapeResultHandler` provided and collect_results is False, only errors and links will be captured"
+            )
         else:
-            logger.info("no `ScrapeResultHandler` provided, using default handler functions")
+            logger.info(
+                "no `ScrapeResultHandler` provided, using default handler functions"
+            )
         scrape_result_handler = ScrapeResultHandler()
 
     # normalize delay range if provided
@@ -167,7 +178,11 @@ async def crawl(
             delay_range = None  # disallow negative
     logger.info(
         "crawl started for %s (depth=%s concurrency=%s max_pages=%s delay=%s)",
-        url, depth, concurrency, max_pages, delay_range,
+        url,
+        depth,
+        concurrency,
+        max_pages,
+        delay_range,
     )
 
     root_url = fix_url(url)
@@ -257,7 +272,11 @@ async def crawl(
                 # simple delay / jitter if specified; skip if first scrape
                 if delay_range is not None and is_first_depth:
                     wait_time = random.uniform(*delay_range)
-                    logger.info("waiting %.2f seconds before scraping %s", wait_time, current_url)
+                    logger.info(
+                        "waiting %.2f seconds before scraping %s",
+                        wait_time,
+                        current_url,
+                    )
                     await asyncio.sleep(wait_time)
                 scrape_result = await scrape(
                     base=instance,
@@ -277,15 +296,25 @@ async def crawl(
                 )
                 pages_processed += 1
                 # determine final canonical URL (after redirects)
-                final_url = getattr(scrape_result, "url", None) or (scrape_result.tab.url if scrape_result.tab else current_url)
+                final_url = getattr(scrape_result, "url", None) or (
+                    scrape_result.tab.url if scrape_result.tab else current_url
+                )
                 final_url = fix_url(final_url)
 
                 links: list[str] = []
                 if scrape_result.timed_out_navigating:
-                    timed_out_links.append(FailedLink(current_url, scrape_result.timed_out_navigating, error_obj))
+                    timed_out_links.append(
+                        FailedLink(
+                            current_url, scrape_result.timed_out_navigating, error_obj
+                        )
+                    )
                 else:
                     if final_url in processed_final_urls:
-                        logger.debug("skip duplicate final url %s (source %s)", final_url, current_url)
+                        logger.debug(
+                            "skip duplicate final url %s (source %s)",
+                            final_url,
+                            current_url,
+                        )
                     else:
                         # handler already executed inside scrape(); collect links + finalize bookkeeping
                         processed_final_urls.add(final_url)
@@ -302,7 +331,10 @@ async def crawl(
                         responses.append(scrape_result)
 
                 # enqueue new links only if we processed this final url just now
-                if final_url in processed_final_urls and not scrape_result.timed_out_navigating:
+                if (
+                    final_url in processed_final_urls
+                    and not scrape_result.timed_out_navigating
+                ):
                     # if depth is None there is no limit
                     if (depth is None or current_depth < depth) and links:
                         for link in links:
@@ -312,13 +344,22 @@ async def crawl(
                                 await queue.put((fix_url(link), current_depth + 1))
 
                 # close tab (timeout to avoid hang) unless it's the dedicated context tab
-                if scrape_result.tab and not (new_window and scrape_result.tab is instance):
+                if scrape_result.tab and not (
+                    new_window and scrape_result.tab is instance
+                ):
+
                     async def _close_tab(t_: nodriver.Tab):
                         try:
                             await asyncio.wait_for(t_.close(), timeout=5)
                         except Exception:
-                            logger.warning("tab close failed or timed out for %s", getattr(t_, 'url', '<unknown>'))
-                    closing_tasks.append(asyncio.create_task(_close_tab(scrape_result.tab)))
+                            logger.warning(
+                                "tab close failed or timed out for %s",
+                                getattr(t_, "url", "<unknown>"),
+                            )
+
+                    closing_tasks.append(
+                        asyncio.create_task(_close_tab(scrape_result.tab))
+                    )
             except Exception as e:
                 failed_links.append(FailedLink(current_url, False, e))
                 logger.exception("unexpected error during crawl for %s", current_url)
@@ -390,18 +431,18 @@ async def crawl(
     return result
 
 
-async def scrape( 
+async def scrape(
     base: nodriver.Tab | nodriver.Browser,
     url: str,
     # scrape_bytes = True,
     scrape_result_handler: ScrapeResultHandler | None = None,
     *,
-    navigation_timeout = 30,
-    wait_for_page_load = True,
-    page_load_timeout = 60,
-    extra_wait_ms = 0,
-    new_tab = False,
-    new_window = False,
+    navigation_timeout=30,
+    wait_for_page_load=True,
+    page_load_timeout=60,
+    extra_wait_ms=0,
+    new_tab=False,
+    new_window=False,
     # request_paused_handler = ScrapeRequestPausedHandler,
     proxy_server: str = None,
     proxy_bypass_list: list[str] = None,
@@ -441,7 +482,7 @@ async def scrape(
     # :param request_paused_handler: custom fetch interception handler.
     # **must be a type**—not an instance—so that it can be initiated later with the correct values attached
     # :type request_paused_handler: type[ScrapeRequestPausedHandler]
-    
+
     start = time.monotonic()
     url = fix_url(url)
 
@@ -450,8 +491,8 @@ async def scrape(
 
     # central acquisition
     tab = await get(
-        base, 
-        new_window=new_window, 
+        base,
+        new_window=new_window,
         new_tab=new_tab,
         proxy_server=proxy_server,
         proxy_bypass_list=proxy_bypass_list,
@@ -462,13 +503,15 @@ async def scrape(
 
     await tab.send(
         cdp.network.set_extra_http_headers(
-            headers=cdp.network.Headers({
-                "Referer": f"{parsed_url.scheme}://{parsed_url.netloc}",
-            })
+            headers=cdp.network.Headers(
+                {
+                    "Referer": f"{parsed_url.scheme}://{parsed_url.netloc}",
+                }
+            )
         )
     )
 
-    # TODO: figure out why request interception 
+    # TODO: figure out why request interception
     # causes this error with sandboxed iframes:
     # my current theory is that intercepting the main page's URL
     # changes the pages origin or something weird like that.
@@ -497,12 +540,14 @@ async def scrape(
 
         if not nav_response.timed_out_navigating:
             # if it's taking forever to load, get_content() will also take forever to load
-            result.html = await result.tab.evaluate("document.documentElement.outerHTML")
+            result.html = await result.tab.evaluate(
+                "document.documentElement.outerHTML"
+            )
             if isinstance(result.html, Exception):
                 raise result.html
             # use the final URL as the base for extracting links
             result.links = extract_links(result.html, result.url)
-        
+
         # run handler + teardown before possibly closing the tab
         if scrape_result_handler:
             # run handler only if links not already populated to avoid double execution under crawl()
@@ -512,14 +557,18 @@ async def scrape(
                 logger.exception("error running scrape_result_handler for %s", url)
         result.elapsed = timedelta(seconds=time.monotonic() - start)
         elapsed_seconds = result.elapsed.total_seconds()
-        logger.info("successfully finished scrape for %s (elapsed=%.2fs)", url, elapsed_seconds)
+        logger.info(
+            "successfully finished scrape for %s (elapsed=%.2fs)", url, elapsed_seconds
+        )
 
         # await request_paused_handler.stop()
     except Exception:
         result.elapsed = timedelta(seconds=time.monotonic() - start)
         elapsed_seconds = result.elapsed.total_seconds()
         logger.exception(
-            "unexpected error during scrape for %s (elapsed=%.2fs):", url, elapsed_seconds
+            "unexpected error during scrape for %s (elapsed=%.2fs):",
+            url,
+            elapsed_seconds,
         )
 
     return result
@@ -539,9 +588,7 @@ async def click_template_image(
     (`x_shift` and `y_shift`).
 
     if the template filename follows this pattern:
-    """\
-    r"- `{name}__x{-?\d+}__y{-?\d+}`,"\
-    """
+    """ r"- `{name}__x{-?\d+}__y{-?\d+}`," """
 
     then the embedded shifts will be applied unless 
     `x_shift` or `y_shift` are explicitly set to non-zero values.
@@ -618,9 +665,21 @@ async def click_template_image(
         rect_thickness = max(2, int(round(3 * (dpr or 1.0))))
         dot_radius = max(3, int(round(4 * (dpr or 1.0))))
         # rectangle: top-left (xs,ys), bottom-right (xe,ye)
-        cv2.rectangle(scr, (int(xs), int(ys)), (int(xe), int(ye)), (0, 0, 255), thickness=rect_thickness)
+        cv2.rectangle(
+            scr,
+            (int(xs), int(ys)),
+            (int(xe), int(ye)),
+            (0, 0, 255),
+            thickness=rect_thickness,
+        )
         # dot: filled circle at clicked image coords
-        cv2.circle(scr, (int(cx_shifted), int(cy_shifted)), dot_radius, (0, 255, 0), thickness=-1)
+        cv2.circle(
+            scr,
+            (int(cx_shifted), int(cy_shifted)),
+            dot_radius,
+            (0, 255, 0),
+            thickness=-1,
+        )
         out_path = Path(save_annotated_screenshot)
         # ensure parent dir exists
         out_path.parent.mkdir(parents=True, exist_ok=True)

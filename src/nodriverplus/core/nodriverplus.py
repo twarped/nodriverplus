@@ -14,7 +14,6 @@ definitely still needs work tho
 import logging
 import os
 import nodriver
-from types import CoroutineType
 from nodriver import Config
 from .user_agent import *
 from .handlers.result import *
@@ -250,7 +249,7 @@ class NodriverPlus:
         :param base: target tab or browser instance to run crawl on
         :param url: root starting point.
         :param scrape_result_handler: optional `ScrapeResultHandler` to be passed to `scrape()`
-        :param depth: max link depth (0 means single page).
+        :param depth: max link depth; `0` means single page, `None` for unlimited.
         :param crawl_result_handler: if specified, `crawl_result_handler.handle()` 
         will be called and awaited before returning the final `CrawlResult`.
         :param new_window: isolate crawl in new context+window when True.
@@ -370,10 +369,16 @@ class NodriverPlus:
         extra_wait_ms=0,
         new_tab=False,
         new_window=False,
-    ) -> CoroutineType[any, any, ScrapeResult]:
-        """navigate with separate navigation + load timeouts.
+    ) -> ScrapeResult:
+        """get a `Tab` with **timeouts** and customizable **wait** phases.
 
-        returns a partial ScrapeResult (timing + timeout flags + tab ref)
+        example for getting a page and waiting for it to finish loading:
+        ```python
+        tab = await ndp.get_with_timeout("example.com", wait_for_page_load=True)
+        tab = tab.tab  # unwrap `ScrapeResult` to get `Tab`
+        ```
+
+        returns a partial `ScrapeResult` (timing + timeout flags + `tab` ref)
 
         :param tab: existing tab or browser root.
         :param url: target url.
@@ -386,7 +391,7 @@ class NodriverPlus:
         :return: partial ScrapeResult (timing + timeout flags).
         :rtype: ScrapeResult
         """
-        return get_with_timeout(
+        return await get_with_timeout(
             target=self.browser,
             url=url,
             navigation_timeout=navigation_timeout,
@@ -431,7 +436,7 @@ class NodriverPlus:
         :return: acquired/created tab
         :rtype: Tab
         """
-        return get(
+        return await get(
             base=self.browser,
             url=url,
             new_tab=new_tab,

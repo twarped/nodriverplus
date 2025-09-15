@@ -67,14 +67,12 @@ class RequestMeta:
     - `is_redirect`: whether this response is a redirect (status 3xx)
     - `redirect_target`: redirect destination (if any)
     - `streamed`: response body captured via streaming path
-    - `request_will_be_sent_extra_info`: optional `RequestWillBeSentExtraInfo` event attached (if captured)
     """
     request_url: str
     nav_request_id: str
     is_redirect: bool = False
     redirect_target: str | None = None
     streamed: bool = False
-    request_will_be_sent_extra_info: cdp.network.RequestWillBeSentExtraInfo | None = None
 
     @classmethod
     def from_event(cls, ev: cdp.fetch.RequestPaused) -> "RequestMeta":
@@ -168,12 +166,11 @@ class RequestPausedHandler:
 
     def __init__(self,
         tab: nodriver.Tab,
-        capture_request_extra_info: bool = True
+
     ):
         """initialize a `RequestPausedHandler` for a given `Tab`.
         
         :param tab: the `Tab` to attach to.
-        :param capture_request_extra_info: whether to capture `RequestWillBeSentExtraInfo` events.
         """
         self.tab = tab
         self.tasks: set[asyncio.Task] = set()
@@ -182,10 +179,6 @@ class RequestPausedHandler:
         self.nav_contexts = {}
         # single lock is fine for tiny critical sections; keeps races away
         self._nav_lock = asyncio.Lock()
-        # track RequestWillBeSentExtraInfo events (optional)
-        self.capture_request_extra_info = capture_request_extra_info
-        self._request_extra_info: dict[str, cdp.network.RequestWillBeSentExtraInfo] = {}
-        self._extra_info_handler_added = False
         self._started = False
 
 
@@ -203,13 +196,6 @@ class RequestPausedHandler:
             ev.meta = meta
         meta.request_url = ev.request.url
         meta.nav_request_id = ev.request_id
-        # attach any captured RequestWillBeSentExtraInfo for downstream logic
-        if self.capture_request_extra_info:
-            extra = self._request_extra_info.get(ev.request_id)
-            if extra is not None:
-                meta.request_will_be_sent_extra_info = extra
-                logger.debug("RequestWillBeSentExtraInfo for %s\n%s", ev.request.url, extra)
-
 
 
     # helper for tracking response redirects
@@ -662,11 +648,6 @@ class RequestPausedHandler:
         logger.info("all pending tasks finished")
 
 
-    def _store_request_will_be_sent_extra_info(self, ev: cdp.network.RequestWillBeSentExtraInfo):
-        # store latest; do not purge immediately (fetch events can arrive after Network events)
-        self._request_extra_info[ev.request_id] = ev
-
-
     async def start(self):
         """
         start request interception on the current tab and config
@@ -686,10 +667,6 @@ class RequestPausedHandler:
         # ensure chrome always loads fresh bytes
         # await self.tab.send(cdp.network.set_cache_disabled(True))
         self.tab.add_handler(cdp.fetch.RequestPaused, self.handle)
-        if self.capture_request_extra_info and not self._extra_info_handler_added:
-            # capture RequestWillBeSentExtraInfo so that paused events can reference original headers
-            self.tab.add_handler(cdp.network.RequestWillBeSentExtraInfo, self._store_request_will_be_sent_extra_info)
-            self._extra_info_handler_added = True
 
 
     async def stop(self, remove_handler = True, wait_for_tasks = True):
@@ -701,8 +678,6 @@ class RequestPausedHandler:
         """
         if remove_handler:
             self.tab.remove_handler(cdp.fetch.RequestPaused, self.handle)
-            if self._extra_info_handler_added:
-                self.tab.remove_handler(cdp.network.RequestWillBeSentExtraInfo, self._store_request_will_be_sent_extra_info)
         if wait_for_tasks:
             await self.wait_for_tasks()
 

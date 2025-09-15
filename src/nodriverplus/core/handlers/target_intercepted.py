@@ -166,8 +166,6 @@ class TargetInterceptorManager:
         interceptors: list[TargetInterceptor] = None,
         network_watchers: list[NetworkWatcher] = None,
         request_paused_handler: type[RequestPausedHandler] | None = None,
-        *,
-        remove_range_header: bool = False,
     ):
         """init TargetInterceptorManager
 
@@ -180,13 +178,11 @@ class TargetInterceptorManager:
         :param request_paused_handler: optional `RequestPausedHandler` subclass to use for request interception.
         **NOTE**: must be an ***uninitiated*** class, not an already created instance: e.g. **`RequestPausedHandler`** *not* `RequestPausedHandler()`.
         :type request_paused_handler: type[RequestPausedHandler]
-        :param remove_range_header: whether to remove `Range` headers from intercepted requests (default: False).
         """
         self.connection = session.connection if isinstance(session, Browser) else session
         self.interceptors = interceptors or []
         self.network_watchers = network_watchers or []
         self.request_paused_handler = request_paused_handler
-        self.remove_range_header = remove_range_header
         # state
         self.request_ids_to_tab: dict[str, Tab] = {}
         self.request_sent_events: dict[str, cdp.network.RequestWillBeSent] = {}
@@ -314,7 +310,6 @@ class TargetInterceptorManager:
                 if self.request_paused_handler:
                     rph = self.request_paused_handler(
                         tab=tab,
-                        remove_range_header=self.remove_range_header,
                     )
                     logger.debug("starting request paused handler %s on %s", rph, tab)
                     await rph.start()
@@ -326,7 +321,6 @@ class TargetInterceptorManager:
             if self.request_paused_handler:
                 rph = self.request_paused_handler(
                     tab=connection,
-                    remove_range_header=self.remove_range_header,
                 )
                 logger.debug("starting request paused handler %s on %s", rph, connection)
                 await rph.start()
