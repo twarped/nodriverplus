@@ -76,7 +76,7 @@ async def get_with_timeout(
     url: str, 
     *,
     navigation_timeout = 30,
-    wait_for_page_load_ = True,
+    wait_for_page_load = True,
     page_load_timeout = 60,
     extra_wait_ms = 0,
     new_tab = False,
@@ -89,7 +89,7 @@ async def get_with_timeout(
     :param tab: existing tab or browser root.
     :param url: target url.
     :param navigation_timeout: seconds for navigation phase.
-    :param wait_for_page_load_: whether to wait for load event.
+    :param wait_for_page_load: whether to wait for load event.
     :param page_load_timeout: seconds for load phase.
     :param extra_wait_ms: post-load wait for dynamic content.
     :param new_tab: request new tab first.
@@ -125,10 +125,10 @@ async def get_with_timeout(
         logger.warning("timed out getting %s (navigation phase) (elapsed=%.2fs)", url, result.elapsed.total_seconds())
         return result
 
-    if wait_for_page_load_:
+    if wait_for_page_load:
         # avoid circular import at module import time by importing locally
-        from .tab import wait_for_page_load
-        load_task = asyncio.create_task(wait_for_page_load(base, extra_wait_ms))
+        from .tab import wait_for_page_load as wait_for_page_load_
+        load_task = asyncio.create_task(wait_for_page_load_(base, extra_wait_ms))
         try:
             # same thing here
             await asyncio.wait_for(

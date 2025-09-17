@@ -365,16 +365,23 @@ class RequestPausedHandler:
         post_data = ev.request.post_data
         if post_data is not None:
             try:
-                # try to detect if already valid base64; if not, encode
+                # fast-path: if it's already valid base64 (ASCII only) leave as-is
                 base64.b64decode(post_data, validate=True)
             except Exception:
-                if isinstance(post_data, str):
-                    post_data = base64.b64encode(post_data.encode()).decode()
-                elif isinstance(post_data, (bytes, bytearray)):
-                    post_data = base64.b64encode(bytes(post_data)).decode()
-                else:
-                    # unknown type - skip encoding and let chrome handle (will likely fail)
-                    logger.debug("unexpected post_data type for %s: %r", ev.request.url, type(post_data))
+                try:
+                    # normalize to bytes safely. strings may contain lone surrogates
+                    # which 'utf-8' refuses to encode; use 'surrogatepass' to round-trip
+                    if isinstance(post_data, str):
+                        post_bytes = post_data.encode('utf-8', 'surrogatepass')
+                    elif isinstance(post_data, (bytes, bytearray)):
+                        post_bytes = bytes(post_data)
+                    else:
+                        # unexpected type, coerce to str then to bytes as a last resort
+                        post_bytes = str(post_data).encode('utf-8', 'surrogatepass')
+                    post_data = base64.b64encode(post_bytes).decode('ascii')
+                except Exception as exc:
+                    # log the failure and leave post_data as-is so chrome can attempt handling
+                    logger.debug("failed to base64-encode post_data for %s: %s", ev.request.url, exc)
         header_entries = [cdp.fetch.HeaderEntry(name=key, value=value) for key, value in ev.request.headers.items()]
         logger.debug("continuing request for %s", ev.request.url)
         try:

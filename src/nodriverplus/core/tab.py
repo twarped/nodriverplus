@@ -530,7 +530,7 @@ async def scrape(
             tab,
             url,
             navigation_timeout=navigation_timeout,
-            wait_for_page_load_=wait_for_page_load,
+            wait_for_page_load=wait_for_page_load,
             page_load_timeout=page_load_timeout,
             extra_wait_ms=extra_wait_ms,
         )
